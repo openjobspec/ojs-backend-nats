@@ -1,0 +1,12 @@
+# Build artifacts
+bin/
+/ojs-server
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
