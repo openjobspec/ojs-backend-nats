@@ -1,0 +1,105 @@
+name: Conformance
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: ojs-backend-nats
+
+      - uses: actions/checkout@v4
+        with:
+          repository: openjobspec/ojs-conformance
+          path: ojs-conformance
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ojs-backend-nats/go.mod
+
+      - name: Start NATS with JetStream
+        run: |
+          docker run -d --name nats \
+            -p 4222:4222 -p 8222:8222 \
+            nats:2.10-alpine --jetstream
+          sleep 2
+          wget -q --spider http://localhost:8222/healthz
+
+      - name: Start Redis for test isolation
+        run: |
+          docker run -d --name redis \
+            -p 6379:6379 \
+            redis:7-alpine
+          sleep 1
+          docker exec redis redis-cli ping
+
+      - name: Build server
+        working-directory: ojs-backend-nats
+        run: go build -o bin/ojs-server ./cmd/ojs-server
+
+      - name: Build conformance runner
+        working-directory: ojs-conformance
+        run: go build -o bin/ojs-conformance ./runner/http/
+
+      - name: Start server
+        working-directory: ojs-backend-nats
+        run: |
+          NATS_URL=nats://localhost:4222 ./bin/ojs-server &
+          sleep 2
+          curl -sf http://localhost:8080/ojs/v1/health
+
+      - name: Run conformance tests
+        id: conformance
+        run: |
+          set +e
+          OUTPUT=$(ojs-conformance/bin/ojs-conformance \
+            -url http://localhost:8080 \
+            -suites ojs-conformance/suites \
+            -redis redis://localhost:6379 2>&1)
+          EXIT_CODE=$?
+          echo "$OUTPUT"
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+
+          LEVEL="none"
+          for L in 0 1 2 3 4; do
+            if echo "$OUTPUT" | grep -q "Level ${L}.*PASS\|level-${L}.*PASS\|Level${L}.*PASS"; then
+              LEVEL="$L"
+            fi
+          done
+          if [ "$EXIT_CODE" -eq 0 ]; then
+            LEVEL="4"
+          fi
+          echo "level=$LEVEL" >> "$GITHUB_OUTPUT"
+          exit $EXIT_CODE
+
+      - name: Generate conformance badge
+        if: github.ref == 'refs/heads/main' && always()
+        run: |
+          LEVEL="${{ steps.conformance.outputs.level }}"
+          if [ "$LEVEL" = "none" ]; then
+            COLOR="red"
+            LABEL="failing"
+          else
+            COLOR="brightgreen"
+            LABEL="Level%20${LEVEL}"
+          fi
+          mkdir -p ojs-backend-nats/.github/badges
+          curl -s "https://img.shields.io/badge/OJS%20Conformance-${LABEL}-${COLOR}" \
+            -o ojs-backend-nats/.github/badges/conformance.svg
+
+      - name: Commit badge
+        if: github.ref == 'refs/heads/main' && always()
+        working-directory: ojs-backend-nats
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add .github/badges/conformance.svg 2>/dev/null || true
+          git diff --cached --quiet || git commit -m "chore: update conformance badge [skip ci]"
+          git push || true
