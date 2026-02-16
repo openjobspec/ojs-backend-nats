@@ -315,7 +315,7 @@ func (b *NATSBackend) Fetch(ctx context.Context, queues []string, count int, wor
 				effectiveVisTimeout = *job.VisibilityTimeoutMs
 			}
 			if effectiveVisTimeout <= 0 {
-				effectiveVisTimeout = 30000
+				effectiveVisTimeout = core.DefaultVisibilityTimeoutMs
 			}
 
 			deadline := now.Add(time.Duration(effectiveVisTimeout) * time.Millisecond)
