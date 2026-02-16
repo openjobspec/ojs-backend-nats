@@ -2,6 +2,10 @@
 bin/
 /ojs-server
 
+# Environment
+.env
+.env.local
+
 # IDE
 .idea/
 .vscode/
