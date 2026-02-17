@@ -3,6 +3,7 @@ package server
 import (
 	"os"
 	"strconv"
+	"time"
 )
 
 // Config holds server configuration from environment variables.
@@ -10,6 +11,15 @@ type Config struct {
 	Port     string
 	GRPCPort string
 	NatsURL  string
+	APIKey   string
+
+	// HTTP server timeouts
+	ReadTimeout  time.Duration
+	WriteTimeout time.Duration
+	IdleTimeout  time.Duration
+
+	// Shutdown drain timeout
+	ShutdownTimeout time.Duration
 }
 
 // LoadConfig reads configuration from environment variables with defaults.
@@ -18,6 +28,13 @@ func LoadConfig() Config {
 		Port:     getEnv("OJS_PORT", "8080"),
 		GRPCPort: getEnv("OJS_GRPC_PORT", "9090"),
 		NatsURL:  getEnv("NATS_URL", "nats://localhost:4222"),
+		APIKey:   getEnv("OJS_API_KEY", ""),
+
+		ReadTimeout:  getDurationEnv("OJS_READ_TIMEOUT", 30*time.Second),
+		WriteTimeout: getDurationEnv("OJS_WRITE_TIMEOUT", 30*time.Second),
+		IdleTimeout:  getDurationEnv("OJS_IDLE_TIMEOUT", 120*time.Second),
+
+		ShutdownTimeout: getDurationEnv("OJS_SHUTDOWN_TIMEOUT", 30*time.Second),
 	}
 }
 
@@ -32,6 +49,15 @@ func getEnvInt(key string, defaultVal int) int {
 	if val, ok := os.LookupEnv(key); ok {
 		if n, err := strconv.Atoi(val); err == nil {
 			return n
+		}
+	}
+	return defaultVal
+}
+
+func getDurationEnv(key string, defaultVal time.Duration) time.Duration {
+	if val, ok := os.LookupEnv(key); ok {
+		if d, err := time.ParseDuration(val); err == nil {
+			return d
 		}
 	}
 	return defaultVal
