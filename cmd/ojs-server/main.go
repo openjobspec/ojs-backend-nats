@@ -8,11 +8,12 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"google.golang.org/grpc"
 
+	"github.com/openjobspec/ojs-backend-nats/internal/core"
 	ojsgrpc "github.com/openjobspec/ojs-backend-nats/internal/grpc"
+	"github.com/openjobspec/ojs-backend-nats/internal/metrics"
 	natsbackend "github.com/openjobspec/ojs-backend-nats/internal/nats"
 	"github.com/openjobspec/ojs-backend-nats/internal/scheduler"
 	"github.com/openjobspec/ojs-backend-nats/internal/server"
@@ -35,19 +36,22 @@ func main() {
 
 	slog.Info("connected to NATS", "url", cfg.NatsURL)
 
+	// Initialize Prometheus server info metric
+	metrics.Init(core.OJSVersion, "nats")
+
 	// Start background scheduler
 	sched := scheduler.New(backend)
 	sched.Start()
 	defer sched.Stop()
 
 	// Create HTTP server
-	router := server.NewRouter(backend)
+	router := server.NewRouter(backend, cfg)
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      router,
-		ReadTimeout:  30 * time.Second,
-		WriteTimeout: 30 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		ReadTimeout:  cfg.ReadTimeout,
+		WriteTimeout: cfg.WriteTimeout,
+		IdleTimeout:  cfg.IdleTimeout,
 	}
 
 	// Start server
@@ -84,7 +88,7 @@ func main() {
 	sched.Stop()
 	grpcServer.GracefulStop()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()
 
 	if err := srv.Shutdown(ctx); err != nil {
