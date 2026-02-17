@@ -215,6 +215,14 @@ func (m *mockBackend) AdvanceWorkflow(ctx context.Context, workflowID string, jo
 	return nil
 }
 
+func (m *mockBackend) ListJobs(ctx context.Context, filters core.JobListFilters, limit, offset int) ([]*core.Job, int, error) {
+	return nil, 0, nil
+}
+
+func (m *mockBackend) ListWorkers(ctx context.Context, limit, offset int) ([]*core.WorkerInfo, core.WorkerSummary, error) {
+	return nil, core.WorkerSummary{}, nil
+}
+
 func (m *mockBackend) Close() error { return nil }
 
 // newTestRouter creates a chi.Mux with all OJS routes wired to the given backend.
