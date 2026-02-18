@@ -11,6 +11,8 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/nats-io/nats.go/jetstream"
 
+	ojsotel "github.com/openjobspec/ojs-go-backend-common/otel"
+
 	"github.com/openjobspec/ojs-backend-nats/internal/core"
 	"github.com/openjobspec/ojs-backend-nats/internal/kv"
 )
@@ -148,6 +150,11 @@ func New(natsURL string) (*NATSBackend, error) {
 	}, nil
 }
 
+// Conn returns the underlying NATS connection for use by auxiliary services (e.g., pub/sub broker).
+func (b *NATSBackend) Conn() *nats.Conn {
+	return b.nc
+}
+
 func (b *NATSBackend) Close() error {
 	b.nc.Close()
 	return nil
@@ -155,6 +162,9 @@ func (b *NATSBackend) Close() error {
 
 // Push enqueues a single job.
 func (b *NATSBackend) Push(ctx context.Context, job *core.Job) (*core.Job, error) {
+	ctx, span := ojsotel.StartJobSpan(ctx, "push", job.ID, job.Type, job.Queue)
+	defer span.End()
+
 	now := time.Now()
 
 	if job.ID == "" {
@@ -258,6 +268,9 @@ func (b *NATSBackend) Push(ctx context.Context, job *core.Job) (*core.Job, error
 
 // Fetch claims jobs from the specified queues.
 func (b *NATSBackend) Fetch(ctx context.Context, queues []string, count int, workerID string, visibilityTimeoutMs int) ([]*core.Job, error) {
+	ctx, span := ojsotel.StartStorageSpan(ctx, "fetch", "nats")
+	defer span.End()
+
 	now := time.Now()
 	var jobs []*core.Job
 
@@ -347,6 +360,9 @@ func (b *NATSBackend) Fetch(ctx context.Context, queues []string, count int, wor
 
 // Ack acknowledges a job as completed.
 func (b *NATSBackend) Ack(ctx context.Context, jobID string, result []byte) (*core.AckResponse, error) {
+	ctx, span := ojsotel.StartJobSpan(ctx, "ack", jobID, "", "")
+	defer span.End()
+
 	job, err := b.getJobState(ctx, jobID)
 	if err != nil {
 		return nil, core.NewNotFoundError("Job", jobID)
@@ -400,6 +416,9 @@ func (b *NATSBackend) Ack(ctx context.Context, jobID string, result []byte) (*co
 
 // Nack reports a job failure.
 func (b *NATSBackend) Nack(ctx context.Context, jobID string, jobErr *core.JobError, requeue bool) (*core.NackResponse, error) {
+	ctx, span := ojsotel.StartJobSpan(ctx, "nack", jobID, "", "")
+	defer span.End()
+
 	job, err := b.getJobState(ctx, jobID)
 	if err != nil {
 		return nil, core.NewNotFoundError("Job", jobID)
