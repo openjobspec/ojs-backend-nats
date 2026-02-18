@@ -51,7 +51,7 @@ jobs:
       - name: Start server
         working-directory: ojs-backend-nats
         run: |
-          NATS_URL=nats://localhost:4222 ./bin/ojs-server &
+          OJS_ALLOW_INSECURE_NO_AUTH=true NATS_URL=nats://localhost:4222 ./bin/ojs-server &
           sleep 2
           curl -sf http://localhost:8080/ojs/v1/health
 

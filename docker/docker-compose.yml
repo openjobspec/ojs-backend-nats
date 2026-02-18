@@ -33,6 +33,7 @@ services:
       - OJS_PORT=8080
       - NATS_URL=nats://nats:4222
       - REDIS_URL=redis://redis:6379
+      - OJS_ALLOW_INSECURE_NO_AUTH=true
     depends_on:
       nats:
         condition: service_healthy
@@ -49,6 +50,7 @@ services:
       - OJS_PORT=8080
       - NATS_URL=nats://nats:4222
       - REDIS_URL=redis://redis:6379
+      - OJS_ALLOW_INSECURE_NO_AUTH=true
     volumes:
       - ..:/app
     depends_on:

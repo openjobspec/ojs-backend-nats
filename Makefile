@@ -10,7 +10,7 @@ build:
 	go build -o bin/ojs-server ./cmd/ojs-server
 
 run: build
-	NATS_URL=$(NATS_URL) ./bin/ojs-server
+	OJS_ALLOW_INSECURE_NO_AUTH=true NATS_URL=$(NATS_URL) ./bin/ojs-server
 
 test:
 	go test ./... -race -cover
