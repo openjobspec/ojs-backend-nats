@@ -1,39 +1,81 @@
-name: Bug report
-description: Report an unexpected behavior or regression
+name: Bug Report
+description: Report a bug or unexpected behavior
 title: "[Bug]: "
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for filing a bug report.
+        Thank you for taking the time to report a bug.
+
   - type: textarea
-    id: summary
+    id: description
     attributes:
-      label: Summary
-      description: What happened?
+      label: Description
+      description: A clear and concise description of what the bug is.
     validations:
       required: true
+
   - type: textarea
-    id: steps
+    id: reproduction
     attributes:
-      label: Steps to reproduce
-      description: Include API calls, payloads, and environment details.
+      label: Steps to Reproduce
+      description: Steps to reproduce the behavior.
+      placeholder: |
+        1. Set up...
+        2. Run...
+        3. See error...
     validations:
       required: true
+
   - type: textarea
     id: expected
     attributes:
-      label: Expected behavior
+      label: Expected Behavior
+      description: What you expected to happen.
     validations:
       required: true
+
   - type: textarea
-    id: logs
+    id: actual
     attributes:
-      label: Logs or output
-      description: Include relevant server logs or errors.
+      label: Actual Behavior
+      description: What actually happened. Include error messages or logs if applicable.
+    validations:
+      required: true
+
   - type: input
     id: version
     attributes:
       label: Version
-      placeholder: v0.x.x or commit SHA
+      description: What version are you using?
+      placeholder: "e.g., v1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      description: Which OJS backend are you using?
+      options:
+        - Redis
+        - PostgreSQL
+        - Kafka
+        - NATS
+        - SQS
+        - Other / N/A
+    validations:
+      required: false
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Any relevant environment details (OS, language version, etc.).
+      placeholder: |
+        - OS: macOS 14.0
+        - Go: 1.22.0
+        - Redis: 7.2
+    validations:
+      required: false
