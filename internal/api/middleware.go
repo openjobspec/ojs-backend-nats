@@ -3,27 +3,20 @@ package api
 import (
 	"log/slog"
 	"net/http"
-	"strings"
 	"time"
 
-	"github.com/openjobspec/ojs-backend-nats/internal/core"
+	commonmw "github.com/openjobspec/ojs-go-backend-common/middleware"
 )
+
+// maxRequestBodySize is the maximum allowed request body size (1 MB).
+const maxRequestBodySize = 1 << 20
+
+// MaxBodySize limits request body size to prevent OOM from oversized payloads.
+const MaxBodySize = 10 * 1024 * 1024 // 10 MB
 
 // OJSHeaders middleware adds required OJS response headers.
 func OJSHeaders(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("OJS-Version", core.OJSVersion)
-		w.Header().Set("Content-Type", core.OJSMediaType)
-
-		// Generate or echo X-Request-Id
-		reqID := r.Header.Get("X-Request-Id")
-		if reqID == "" {
-			reqID = "req_" + core.NewUUIDv7()
-		}
-		w.Header().Set("X-Request-Id", reqID)
-
-		next.ServeHTTP(w, r)
-	})
+	return commonmw.OJSHeaders(next)
 }
 
 // RequestLogger middleware logs HTTP requests with structured logging.
@@ -52,39 +45,12 @@ func (w *statusWriter) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
-// MaxBodySize limits request body size to prevent OOM from oversized payloads.
-const MaxBodySize = 10 * 1024 * 1024 // 10 MB
-
 // LimitBody middleware restricts request body size.
 func LimitBody(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Body != nil {
-			r.Body = http.MaxBytesReader(w, r.Body, MaxBodySize)
-		}
-		next.ServeHTTP(w, r)
-	})
+	return commonmw.LimitRequestBody(next)
 }
 
 // ValidateContentType middleware validates the Content-Type header for POST requests.
 func ValidateContentType(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
-			ct := r.Header.Get("Content-Type")
-			if ct != "" {
-				// Extract media type (ignore parameters like charset)
-				mediaType := strings.Split(ct, ";")[0]
-				mediaType = strings.TrimSpace(mediaType)
-				if mediaType != core.OJSMediaType && mediaType != "application/json" {
-					WriteError(w, http.StatusBadRequest, core.NewInvalidRequestError(
-						"Unsupported Content-Type. Expected 'application/openjobspec+json' or 'application/json'.",
-						map[string]any{
-							"received": ct,
-						},
-					))
-					return
-				}
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
+	return commonmw.ValidateContentType(next)
 }
