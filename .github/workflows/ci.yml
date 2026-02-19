@@ -25,11 +25,11 @@ jobs:
       - name: golangci-lint
         uses: golangci/golangci-lint-action@55c2c1448f86e01eaae002a5a3a9624417608d84 # v6
         with:
-          version: latest
+          version: v1.64.8
 
       - name: govulncheck
         run: |
-          go install golang.org/x/vuln/cmd/govulncheck@latest
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
           govulncheck ./...
 
   test:
@@ -45,11 +45,21 @@ jobs:
         run: |
           docker run -d --name nats \
             -p 4222:4222 -p 8222:8222 \
-            nats:2.10-alpine --jetstream
+            nats:latest -js -m 8222
           sleep 2
           wget -q --spider http://localhost:8222/healthz
 
       - name: Run tests
-        run: go test ./... -race -cover
+        run: go test ./... -race -cover -coverprofile=coverage.out
         env:
           NATS_URL: nats://localhost:4222
+
+      - name: Check coverage threshold
+        run: |
+          COVERAGE=$(go tool cover -func=coverage.out | grep total | awk '{print substr($3, 1, length($3)-1)}')
+          echo "Total coverage: ${COVERAGE}%"
+          THRESHOLD=40
+          if [ "$(echo "${COVERAGE} < ${THRESHOLD}" | bc -l)" -eq 1 ]; then
+            echo "::error::Coverage ${COVERAGE}% is below minimum threshold of ${THRESHOLD}%"
+            exit 1
+          fi

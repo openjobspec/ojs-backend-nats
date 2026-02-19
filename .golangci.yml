@@ -11,6 +11,10 @@ linters:
     - ineffassign
     - unused
     - gosimple
+    - gocyclo
+    - unparam
+    - bodyclose
+    - noctx
 
 linters-settings:
   errcheck:
@@ -22,6 +26,8 @@ linters-settings:
     enabled-tags:
       - diagnostic
       - performance
+  gocyclo:
+    min-complexity: 15
 
 issues:
   exclude-rules:
