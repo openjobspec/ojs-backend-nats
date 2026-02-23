@@ -781,6 +781,16 @@ func (b *NATSBackend) Heartbeat(ctx context.Context, workerID string, activeJobs
 
 // PushBatch enqueues multiple jobs.
 func (b *NATSBackend) PushBatch(ctx context.Context, jobs []*core.Job) ([]*core.Job, error) {
+	// Pre-validate all jobs before any writes to avoid partial batch failures
+	for _, job := range jobs {
+		if err := core.ValidateEnqueueRequest(&core.EnqueueRequest{
+			Type: job.Type,
+			Args: job.Args,
+		}); err != nil {
+			return nil, err
+		}
+	}
+
 	now := time.Now()
 
 	for i, job := range jobs {
