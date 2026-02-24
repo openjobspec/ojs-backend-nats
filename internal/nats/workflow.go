@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 
 	"github.com/openjobspec/ojs-backend-nats/internal/core"
 )
@@ -296,11 +297,13 @@ func (b *NATSBackend) fireCallback(ctx context.Context, cb *core.WorkflowCallbac
 	if cb.Options != nil && cb.Options.Queue != "" {
 		queue = cb.Options.Queue
 	}
-	b.Push(ctx, &core.Job{
+	if _, err := b.Push(ctx, &core.Job{
 		Type:  cb.Type,
 		Args:  cb.Args,
 		Queue: queue,
-	})
+	}); err != nil {
+		slog.Error("workflow: error firing callback", "type", cb.Type, "error", err)
+	}
 }
 
 func (b *NATSBackend) advanceWorkflow(ctx context.Context, jobID, state string, result []byte) {
