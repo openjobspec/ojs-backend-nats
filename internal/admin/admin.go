@@ -45,3 +45,4 @@ func Handler() http.Handler {
 		fileServer.ServeHTTP(w, r)
 	})
 }
+
