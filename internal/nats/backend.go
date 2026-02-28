@@ -39,6 +39,7 @@ type NATSBackend struct {
 	consumers *ConsumerManager
 
 	startTime time.Time
+	cpStore   *checkpointStore
 }
 
 // New creates a new NATSBackend, connecting to NATS and setting up JetStream resources.
@@ -147,6 +148,7 @@ func New(natsURL string) (*NATSBackend, error) {
 		stats:     kv.NewStore(statsKV),
 		consumers: NewConsumerManager(js),
 		startTime: time.Now(),
+		cpStore:   newCheckpointStore(),
 	}, nil
 }
 
