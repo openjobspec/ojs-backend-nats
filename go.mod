@@ -44,6 +44,7 @@ require (
 	golang.org/x/text v0.34.0 // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20260209200024-4cfbd4190f57 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260209200024-4cfbd4190f57 // indirect
+	nhooyr.io/websocket v1.8.17 // indirect
 )
 
 replace github.com/openjobspec/ojs-go-backend-common => ../ojs-go-backend-common
