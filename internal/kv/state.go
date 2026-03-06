@@ -128,3 +128,4 @@ func (s *Store) Exists(ctx context.Context, key string) bool {
 	_, err := s.kv.Get(ctx, key)
 	return err == nil
 }
+
