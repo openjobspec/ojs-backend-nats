@@ -73,3 +73,4 @@ func EnsureConsumer(ctx context.Context, js jetstream.JetStream, queue string) (
 	}
 	return consumer, nil
 }
+
