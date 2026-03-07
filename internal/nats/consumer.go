@@ -125,3 +125,4 @@ func (cm *ConsumerManager) InProgress(jobID string) error {
 func (cm *ConsumerManager) RemoveInflight(jobID string) {
 	cm.inflight.Delete(jobID)
 }
+
