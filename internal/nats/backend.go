@@ -409,7 +409,7 @@ func (b *NATSBackend) Ack(ctx context.Context, jobID string, result []byte) (*co
 
 	return &core.AckResponse{
 		Acknowledged: true,
-		JobID:        jobID,
+		ID:        jobID,
 		State:        core.StateCompleted,
 		CompletedAt:  now,
 		Job:          updatedJob,
@@ -463,7 +463,7 @@ func (b *NATSBackend) Nack(ctx context.Context, jobID string, jobErr *core.JobEr
 
 		retJob, _ := b.Info(ctx, jobID)
 		return &core.NackResponse{
-			JobID:       jobID,
+			ID:       jobID,
 			State:       core.StateAvailable,
 			Attempt:     job.Attempt,
 			MaxAttempts: maxAttempts,
@@ -553,7 +553,7 @@ func (b *NATSBackend) Nack(ctx context.Context, jobID string, jobErr *core.JobEr
 
 		retJob, _ := b.Info(ctx, jobID)
 		return &core.NackResponse{
-			JobID:       jobID,
+			ID:       jobID,
 			State:       core.StateDiscarded,
 			Attempt:     newAttempt,
 			MaxAttempts: maxAttempts,
@@ -588,7 +588,7 @@ func (b *NATSBackend) Nack(ctx context.Context, jobID string, jobErr *core.JobEr
 
 	retJob, _ := b.Info(ctx, jobID)
 	return &core.NackResponse{
-		JobID:         jobID,
+		ID:         jobID,
 		State:         core.StateRetryable,
 		Attempt:       newAttempt,
 		MaxAttempts:   maxAttempts,
