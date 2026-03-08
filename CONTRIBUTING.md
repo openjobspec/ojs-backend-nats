@@ -109,4 +109,3 @@ make conformance    # Run OJS conformance tests (requires running server)
 ## License
 
 By contributing, you agree that your contributions will be licensed under the Apache-2.0 License.
-
