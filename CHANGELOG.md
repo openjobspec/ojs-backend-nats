@@ -7,6 +7,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-04-20
+
 ### Added
 - Integration tests for NATS backend push/fetch/ack and retry promotion flows.
 - End-to-end API integration test covering create/fetch/ack/job status lifecycle.
