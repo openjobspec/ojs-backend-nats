@@ -13,6 +13,7 @@ import (
 type Scheduler struct {
 	backend  *natsbackend.NATSBackend
 	stop     chan struct{}
+	wg       sync.WaitGroup
 	stopOnce sync.Once
 }
 
@@ -26,20 +27,23 @@ func New(backend *natsbackend.NATSBackend) *Scheduler {
 
 // Start begins all background scheduling goroutines.
 func (s *Scheduler) Start() {
+	s.wg.Add(4)
 	go s.runLoop("scheduled-promoter", 1*time.Second, s.backend.PromoteScheduled)
 	go s.runLoop("retry-promoter", 200*time.Millisecond, s.backend.PromoteRetries)
 	go s.runLoop("stalled-reaper", 500*time.Millisecond, s.backend.RequeueStalled)
 	go s.runLoop("cron-scheduler", 10*time.Second, s.backend.FireCronJobs)
 }
 
-// Stop signals all background goroutines to stop.
+// Stop signals all background goroutines to stop and waits for them to finish.
 func (s *Scheduler) Stop() {
 	s.stopOnce.Do(func() {
 		close(s.stop)
 	})
+	s.wg.Wait()
 }
 
 func (s *Scheduler) runLoop(name string, interval time.Duration, fn func(context.Context) error) {
+	defer s.wg.Done()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -49,10 +53,10 @@ func (s *Scheduler) runLoop(name string, interval time.Duration, fn func(context
 			return
 		case <-ticker.C:
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer cancel()
 			if err := fn(ctx); err != nil {
 				slog.Error("scheduler loop error", "scheduler", name, "error", err)
 			}
+			cancel()
 		}
 	}
 }
