@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"time"
@@ -340,7 +341,12 @@ func (b *NATSBackend) Fetch(ctx context.Context, queues []string, count int, wor
 				VisibilityDeadline: core.FormatTime(deadline),
 				WorkerID:           workerID,
 			}
-			activeData, _ := json.Marshal(activeInfo)
+			activeData, marshalErr := json.Marshal(activeInfo)
+			if marshalErr != nil {
+				slog.Warn("nats fetch: failed to marshal active info", "job_id", jobID, "error", marshalErr)
+				b.consumers.AckMessage(jobID)
+				continue
+			}
 			if _, err := b.active.Put(ctx, jobID, activeData); err != nil {
 				b.consumers.AckMessage(jobID)
 				continue
@@ -727,7 +733,10 @@ func (b *NATSBackend) Heartbeat(ctx context.Context, workerID string, activeJobs
 	if directive != "continue" {
 		workerInfo["directive"] = directive
 	}
-	workerData, _ := json.Marshal(workerInfo)
+	workerData, marshalErr := json.Marshal(workerInfo)
+	if marshalErr != nil {
+		slog.Warn("nats heartbeat: failed to marshal worker info", "worker_id", workerID, "error", marshalErr)
+	}
 	b.workers.Put(ctx, workerID, workerData)
 
 	// Extend visibility for active jobs
@@ -745,7 +754,11 @@ func (b *NATSBackend) Heartbeat(ctx context.Context, workerID string, activeJobs
 			VisibilityDeadline: core.FormatTime(deadline),
 			WorkerID:           workerID,
 		}
-		activeData, _ := json.Marshal(activeInfo)
+		activeData, marshalErr := json.Marshal(activeInfo)
+		if marshalErr != nil {
+			slog.Warn("nats heartbeat: failed to marshal active info", "job_id", jobID, "error", marshalErr)
+			continue
+		}
 		b.active.Put(ctx, jobID, activeData)
 		b.consumers.InProgress(jobID)
 
@@ -841,7 +854,11 @@ func (b *NATSBackend) QueueStats(ctx context.Context, name string) (*core.QueueS
 
 	completedData, _, err := b.stats.Get(ctx, kvStatsKey(name, "completed"))
 	if err == nil {
-		completed, _ = strconv.Atoi(string(completedData))
+		n, parseErr := strconv.Atoi(string(completedData))
+		if parseErr != nil {
+			slog.Warn("nats: invalid completed count", "queue", name, "value", string(completedData), "error", parseErr)
+		}
+		completed = n
 	}
 
 	consumer, err := b.consumers.GetConsumer(ctx, name)
@@ -886,7 +903,10 @@ func (b *NATSBackend) SetWorkerState(ctx context.Context, workerID string, state
 	workerInfo := map[string]any{
 		"directive": state,
 	}
-	data, _ := json.Marshal(workerInfo)
+	data, marshalErr := json.Marshal(workerInfo)
+	if marshalErr != nil {
+		return fmt.Errorf("marshal worker info: %w", marshalErr)
+	}
 	_, err := b.workers.Put(ctx, workerID, data)
 	return err
 }

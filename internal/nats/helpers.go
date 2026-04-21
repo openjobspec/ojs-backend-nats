@@ -3,6 +3,7 @@ package nats
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"sync"
@@ -101,7 +102,10 @@ func (b *NATSBackend) incrementCompleted(ctx context.Context, queue string) {
 			b.stats.Create(ctx, key, []byte("1"))
 			return
 		}
-		count, _ := strconv.Atoi(string(data))
+		count, parseErr := strconv.Atoi(string(data))
+		if parseErr != nil {
+			slog.Warn("nats: invalid counter value", "key", key, "value", string(data), "error", parseErr)
+		}
 		count++
 		_, uErr := b.stats.Update(ctx, key, []byte(strconv.Itoa(count)), rev)
 		if uErr == nil {
