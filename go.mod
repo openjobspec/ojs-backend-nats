@@ -5,7 +5,7 @@ go 1.24.0
 toolchain go1.24.4
 
 require (
-	github.com/go-chi/chi/v5 v5.2.5
+	github.com/go-chi/chi/v5 v5.3.0
 	github.com/nats-io/nats.go v1.39.1
 	github.com/openjobspec/ojs-go-backend-common v0.0.0
 	github.com/prometheus/client_golang v1.23.2
