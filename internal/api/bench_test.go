@@ -120,4 +120,3 @@ func BenchmarkHealthCheck(b *testing.B) {
 		router.ServeHTTP(rr, req)
 	}
 }
-

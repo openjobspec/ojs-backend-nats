@@ -11,8 +11,8 @@ import "fmt"
 //	ojs.events.>                 -- lifecycle events (wildcardable)
 const (
 	// Stream subjects
-	StreamName     = "OJS"
-	SubjectPrefix  = "ojs"
+	StreamName    = "OJS"
+	SubjectPrefix = "ojs"
 
 	// KV bucket names
 	BucketJobs      = "ojs-jobs"

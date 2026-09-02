@@ -15,30 +15,30 @@ import (
 
 // mockBackend implements core.Backend for testing.
 type mockBackend struct {
-	pushFunc           func(ctx context.Context, job *core.Job) (*core.Job, error)
-	pushBatchFunc      func(ctx context.Context, jobs []*core.Job) ([]*core.Job, error)
-	infoFunc           func(ctx context.Context, jobID string) (*core.Job, error)
-	cancelFunc         func(ctx context.Context, jobID string) (*core.Job, error)
-	fetchFunc          func(ctx context.Context, queues []string, count int, workerID string, vis int) ([]*core.Job, error)
-	ackFunc            func(ctx context.Context, jobID string, result []byte) (*core.AckResponse, error)
-	nackFunc           func(ctx context.Context, jobID string, jobErr *core.JobError, requeue bool) (*core.NackResponse, error)
-	heartbeatFunc      func(ctx context.Context, workerID string, activeJobs []string, vis int) (*core.HeartbeatResponse, error)
-	setWorkerStateFunc func(ctx context.Context, workerID string, state string) error
-	healthFunc         func(ctx context.Context) (*core.HealthResponse, error)
-	listQueuesFunc     func(ctx context.Context) ([]core.QueueInfo, error)
-	queueStatsFunc     func(ctx context.Context, name string) (*core.QueueStats, error)
-	pauseQueueFunc     func(ctx context.Context, name string) error
-	resumeQueueFunc    func(ctx context.Context, name string) error
-	listDeadLetterFunc func(ctx context.Context, limit, offset int) ([]*core.Job, int, error)
+	pushFunc             func(ctx context.Context, job *core.Job) (*core.Job, error)
+	pushBatchFunc        func(ctx context.Context, jobs []*core.Job) ([]*core.Job, error)
+	infoFunc             func(ctx context.Context, jobID string) (*core.Job, error)
+	cancelFunc           func(ctx context.Context, jobID string) (*core.Job, error)
+	fetchFunc            func(ctx context.Context, queues []string, count int, workerID string, vis int) ([]*core.Job, error)
+	ackFunc              func(ctx context.Context, jobID string, result []byte) (*core.AckResponse, error)
+	nackFunc             func(ctx context.Context, jobID string, jobErr *core.JobError, requeue bool) (*core.NackResponse, error)
+	heartbeatFunc        func(ctx context.Context, workerID string, activeJobs []string, vis int) (*core.HeartbeatResponse, error)
+	setWorkerStateFunc   func(ctx context.Context, workerID string, state string) error
+	healthFunc           func(ctx context.Context) (*core.HealthResponse, error)
+	listQueuesFunc       func(ctx context.Context) ([]core.QueueInfo, error)
+	queueStatsFunc       func(ctx context.Context, name string) (*core.QueueStats, error)
+	pauseQueueFunc       func(ctx context.Context, name string) error
+	resumeQueueFunc      func(ctx context.Context, name string) error
+	listDeadLetterFunc   func(ctx context.Context, limit, offset int) ([]*core.Job, int, error)
 	retryDeadLetterFunc  func(ctx context.Context, jobID string) (*core.Job, error)
 	deleteDeadLetterFunc func(ctx context.Context, jobID string) error
-	registerCronFunc   func(ctx context.Context, cron *core.CronJob) (*core.CronJob, error)
-	listCronFunc       func(ctx context.Context) ([]*core.CronJob, error)
-	deleteCronFunc     func(ctx context.Context, name string) (*core.CronJob, error)
-	createWorkflowFunc func(ctx context.Context, req *core.WorkflowRequest) (*core.Workflow, error)
-	getWorkflowFunc    func(ctx context.Context, id string) (*core.Workflow, error)
-	cancelWorkflowFunc func(ctx context.Context, id string) (*core.Workflow, error)
-	advanceWorkflowFunc func(ctx context.Context, workflowID string, jobID string, result json.RawMessage, failed bool) error
+	registerCronFunc     func(ctx context.Context, cron *core.CronJob) (*core.CronJob, error)
+	listCronFunc         func(ctx context.Context) ([]*core.CronJob, error)
+	deleteCronFunc       func(ctx context.Context, name string) (*core.CronJob, error)
+	createWorkflowFunc   func(ctx context.Context, req *core.WorkflowRequest) (*core.Workflow, error)
+	getWorkflowFunc      func(ctx context.Context, id string) (*core.Workflow, error)
+	cancelWorkflowFunc   func(ctx context.Context, id string) (*core.Workflow, error)
+	advanceWorkflowFunc  func(ctx context.Context, workflowID string, jobID string, result json.RawMessage, failed bool) error
 }
 
 func (m *mockBackend) Push(ctx context.Context, job *core.Job) (*core.Job, error) {
