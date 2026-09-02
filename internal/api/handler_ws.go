@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"nhooyr.io/websocket"
+	"github.com/coder/websocket"
 
 	commonapi "github.com/openjobspec/ojs-go-backend-common/api"
 	commoncore "github.com/openjobspec/ojs-go-backend-common/core"
@@ -242,7 +243,7 @@ func (h *WSHandler) handleUnsubscribe(ctx context.Context, conn *websocket.Conn,
 	})
 }
 
-func (h *WSHandler) writeJSON(ctx context.Context, conn *websocket.Conn, msg wsResponse) {
+func (h *WSHandler) writeJSON(ctx context.Context, conn *websocket.Conn, msg any) {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return
@@ -274,23 +275,5 @@ func (h *WSHandler) pingLoop(ctx context.Context, conn *websocket.Conn) {
 }
 
 func formatEventID(id uint64) string {
-	return "evt_" + formatUint(id)
+	return "evt_" + strconv.FormatUint(id, 10)
 }
-
-func formatUint(n uint64) string {
-	s := ""
-	for i := 3; i >= 0; i-- {
-		digit := (n / pow10(uint64(i))) % 10
-		s += string(rune('0' + digit))
-	}
-	return s
-}
-
-func pow10(n uint64) uint64 {
-	result := uint64(1)
-	for i := uint64(0); i < n; i++ {
-		result *= 10
-	}
-	return result
-}
-
