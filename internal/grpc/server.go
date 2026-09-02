@@ -3,9 +3,13 @@ package grpc
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
 	"time"
 
 	"github.com/openjobspec/ojs-backend-nats/internal/core"
+	"google.golang.org/genproto/googleapis/rpc/errdetails"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -69,7 +73,7 @@ func (s *Server) Health(ctx context.Context, req *ojsv1.HealthRequest) (*ojsv1.H
 	}
 
 	st := ojsv1.HealthStatus_HEALTH_STATUS_OK
-	if h.Backend.Status != "ok" {
+	if h.Status != "ok" {
 		st = ojsv1.HealthStatus_HEALTH_STATUS_DEGRADED
 	}
 
@@ -83,7 +87,10 @@ func (s *Server) Health(ctx context.Context, req *ojsv1.HealthRequest) (*ojsv1.H
 // --- Job RPCs ---
 
 func (s *Server) Enqueue(ctx context.Context, req *ojsv1.EnqueueRequest) (*ojsv1.EnqueueResponse, error) {
-	job := enqueueRequestToJob(req)
+	job, err := enqueueRequestToJob(req)
+	if err != nil {
+		return nil, coreErrorToGRPC(err)
+	}
 
 	result, err := s.backend.Push(ctx, job)
 	if err != nil {
@@ -96,9 +103,21 @@ func (s *Server) Enqueue(ctx context.Context, req *ojsv1.EnqueueRequest) (*ojsv1
 }
 
 func (s *Server) EnqueueBatch(ctx context.Context, req *ojsv1.EnqueueBatchRequest) (*ojsv1.EnqueueBatchResponse, error) {
+	if req == nil || len(req.Jobs) == 0 {
+		return nil, coreErrorToGRPC(core.NewInvalidRequestError(
+			"At least one batch job is required.",
+			map[string]any{"field": "jobs", "validation": "non_empty"},
+		))
+	}
+
 	jobs := make([]*core.Job, 0, len(req.Jobs))
+	now := time.Now()
 	for _, j := range req.Jobs {
-		jobs = append(jobs, enqueueJobRequestToJob(j))
+		job, err := enqueueJobRequestToJob(j, req.DefaultOptions, now)
+		if err != nil {
+			return nil, coreErrorToGRPC(err)
+		}
+		jobs = append(jobs, job)
 	}
 
 	results, err := s.backend.PushBatch(ctx, jobs)
@@ -112,7 +131,8 @@ func (s *Server) EnqueueBatch(ctx context.Context, req *ojsv1.EnqueueBatchReques
 	}
 
 	return &ojsv1.EnqueueBatchResponse{
-		Jobs: protoJobs,
+		Jobs:  protoJobs,
+		Count: int32(len(protoJobs)),
 	}, nil
 }
 
@@ -194,21 +214,54 @@ func (s *Server) Nack(ctx context.Context, req *ojsv1.NackRequest) (*ojsv1.NackR
 		return nil, coreErrorToGRPC(err)
 	}
 
-	return &ojsv1.NackResponse{
+	response := &ojsv1.NackResponse{
 		State: stateToProto[nackResp.State],
-	}, nil
+	}
+	if nackResp.NextAttemptAt != "" {
+		if nextAttempt, parseErr := time.Parse(time.RFC3339, nackResp.NextAttemptAt); parseErr == nil {
+			response.NextAttemptAt = timestamppb.New(nextAttempt)
+		}
+	}
+	return response, nil
 }
 
 func (s *Server) Heartbeat(ctx context.Context, req *ojsv1.HeartbeatRequest) (*ojsv1.HeartbeatResponse, error) {
 	visibilityMs := core.DefaultVisibilityTimeoutMs
+	if req == nil {
+		return nil, coreErrorToGRPC(core.NewInvalidRequestError("heartbeat request is required", nil))
+	}
+	if req.WorkerId == "" {
+		return nil, coreErrorToGRPC(core.NewInvalidRequestError(
+			"worker_id is required",
+			map[string]any{"field": "worker_id", "validation": "required"},
+		))
+	}
+	if req.ExtendBy != nil {
+		var err error
+		visibilityMs, err = positiveDurationMillis("extend_by", req.ExtendBy)
+		if err != nil {
+			return nil, coreErrorToGRPC(err)
+		}
+	}
 
-	hbResp, err := s.backend.Heartbeat(ctx, req.WorkerId, nil, visibilityMs)
+	var activeJobs []string
+	if req.Id != "" {
+		activeJobs = []string{req.Id}
+	}
+
+	hbResp, err := s.backend.Heartbeat(ctx, req.WorkerId, activeJobs, visibilityMs)
 	if err != nil {
 		return nil, coreErrorToGRPC(err)
 	}
 
 	resp := &ojsv1.HeartbeatResponse{
 		DirectedState: directiveToWorkerState(hbResp.Directive),
+	}
+	if len(hbResp.JobsExtended) > 0 {
+		serverTime, parseErr := time.Parse(time.RFC3339, hbResp.ServerTime)
+		if parseErr == nil {
+			resp.NewDeadline = timestamppb.New(serverTime.Add(time.Duration(visibilityMs) * time.Millisecond))
+		}
 	}
 	return resp, nil
 }
@@ -311,9 +364,9 @@ func (s *Server) DeleteDeadLetter(ctx context.Context, req *ojsv1.DeleteDeadLett
 
 func (s *Server) RegisterCron(ctx context.Context, req *ojsv1.RegisterCronRequest) (*ojsv1.RegisterCronResponse, error) {
 	argsJSON, err := json.Marshal(valuesToInterface(req.Args))
-if err != nil {
-return nil, status.Errorf(codes.InvalidArgument, "failed to marshal cron args: %v", err)
-}
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "failed to marshal cron args: %v", err)
+	}
 
 	cronJob := &core.CronJob{
 		Name:       req.Name,
@@ -386,7 +439,10 @@ func (s *Server) ListCron(ctx context.Context, req *ojsv1.ListCronRequest) (*ojs
 // --- Workflow RPCs ---
 
 func (s *Server) CreateWorkflow(ctx context.Context, req *ojsv1.CreateWorkflowRequest) (*ojsv1.CreateWorkflowResponse, error) {
-	wfReq := protoToWorkflowRequest(req)
+	wfReq, err := protoToWorkflowRequest(req)
+	if err != nil {
+		return nil, coreErrorToGRPC(err)
+	}
 
 	wf, err := s.backend.CreateWorkflow(ctx, wfReq)
 	if err != nil {
@@ -437,30 +493,44 @@ func (s *Server) StreamJobs(req *ojsv1.StreamJobsRequest, stream ojsv1.OJSServic
 	}
 
 	ctx := stream.Context()
-	ticker := time.NewTicker(500 * time.Millisecond)
+	ticker := time.NewTicker(50 * time.Millisecond)
 	defer ticker.Stop()
 
-	active := 0
+	outstanding := make(map[string]struct{}, maxConcurrent)
+	defer func() {
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancel()
+		for jobID := range outstanding {
+			_, _ = s.backend.Nack(cleanupCtx, jobID, nil, true)
+		}
+	}()
+
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			if active >= maxConcurrent {
+			for jobID := range outstanding {
+				job, err := s.backend.Info(ctx, jobID)
+				if err != nil || job.State != core.StateActive {
+					delete(outstanding, jobID)
+				}
+			}
+			if len(outstanding) >= maxConcurrent {
 				continue
 			}
 
-			count := maxConcurrent - active
+			count := maxConcurrent - len(outstanding)
 			jobs, err := s.backend.Fetch(ctx, req.Queues, count, workerID, core.DefaultVisibilityTimeoutMs)
 			if err != nil {
 				continue
 			}
 
 			for _, j := range jobs {
+				outstanding[j.ID] = struct{}{}
 				if err := stream.Send(jobToProto(j)); err != nil {
 					return err
 				}
-				active++
 			}
 		}
 	}
@@ -479,11 +549,12 @@ func (s *Server) StreamEvents(req *ojsv1.StreamEventsRequest, stream ojsv1.OJSSe
 		err   error
 	)
 
-	if req.JobId != "" {
+	switch {
+	case req.JobId != "":
 		ch, unsub, err = s.subscriber.SubscribeJob(req.JobId)
-	} else if len(req.Queues) == 1 {
+	case len(req.Queues) == 1:
 		ch, unsub, err = s.subscriber.SubscribeQueue(req.Queues[0])
-	} else {
+	default:
 		ch, unsub, err = s.subscriber.SubscribeAll()
 	}
 	if err != nil {
@@ -581,49 +652,54 @@ func coreErrorToGRPC(err error) error {
 	if err == nil {
 		return nil
 	}
-	msg := err.Error()
 
-	switch {
-	case isNotFound(msg):
-		return status.Errorf(codes.NotFound, "%s", msg)
-	case isConflict(msg):
-		return status.Errorf(codes.AlreadyExists, "%s", msg)
-	case isDuplicate(msg):
-		return status.Errorf(codes.AlreadyExists, "%s", msg)
-	case isValidation(msg):
-		return status.Errorf(codes.InvalidArgument, "%s", msg)
-	default:
-		return status.Errorf(codes.Internal, "%s", msg)
+	var ojsErr *core.OJSError
+	if !errors.As(err, &ojsErr) {
+		return status.Error(codes.Internal, err.Error())
 	}
-}
 
-func isNotFound(msg string) bool {
-	return contains(msg, "not found") || contains(msg, "not_found")
-}
-
-func isConflict(msg string) bool {
-	return contains(msg, "conflict") || contains(msg, "invalid state transition")
-}
-
-func isDuplicate(msg string) bool {
-	return contains(msg, "duplicate") || contains(msg, "already exists")
-}
-
-func isValidation(msg string) bool {
-	return contains(msg, "invalid") || contains(msg, "required") || contains(msg, "validation")
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsStr(s, substr))
-}
-
-func containsStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
+	code := codes.Internal
+	switch ojsErr.Code {
+	case core.ErrCodeInvalidRequest, core.ErrCodeInvalidPayload, core.ErrCodeValidationError:
+		code = codes.InvalidArgument
+	case core.ErrCodeNotFound:
+		code = codes.NotFound
+	case core.ErrCodeConflict, core.ErrCodeQueuePaused:
+		code = codes.FailedPrecondition
+	case core.ErrCodeDuplicate:
+		code = codes.AlreadyExists
+	case core.ErrCodeUnsupported:
+		code = codes.Unimplemented
+	case core.ErrCodeRateLimited:
+		code = codes.ResourceExhausted
+	case core.ErrCodeVisibilityTimeout:
+		code = codes.DeadlineExceeded
+	case core.ErrCodeInternalError:
+		code = codes.Internal
 	}
-	return false
+
+	metadata := map[string]string{
+		"code":      ojsErr.Code,
+		"retryable": fmt.Sprintf("%t", ojsErr.Retryable),
+	}
+	if ojsErr.Type != "" {
+		metadata["type"] = ojsErr.Type
+	}
+	for key, value := range ojsErr.Details {
+		metadata[key] = fmt.Sprint(value)
+	}
+	reason := "OJS_" + strings.ToUpper(ojsErr.Code)
+	detail := &errdetails.ErrorInfo{
+		Reason:   reason,
+		Domain:   "openjobspec.org",
+		Metadata: metadata,
+	}
+	st := status.New(code, ojsErr.Message)
+	withDetails, detailErr := st.WithDetails(detail)
+	if detailErr != nil {
+		return st.Err()
+	}
+	return withDetails.Err()
 }
 
 func valuesToInterface(vals []*structpb.Value) []any {
