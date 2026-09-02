@@ -1,12 +1,13 @@
 services:
   nats:
     image: nats:2.10-alpine
-    command: ["--jetstream", "--store_dir", "/data"]
+    command: ["--config", "/etc/nats/nats.conf"]
     ports:
       - "4222:4222"
       - "8222:8222"
     volumes:
       - nats-data:/data
+      - ./nats.conf:/etc/nats/nats.conf:ro
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
       interval: 5s
