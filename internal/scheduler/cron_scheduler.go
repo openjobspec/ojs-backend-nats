@@ -15,15 +15,15 @@
 // On each scheduler tick, FireCronJobs:
 //  1. Lists all registered cron jobs from the KV store.
 //  2. Parses NextRunAt and skips jobs whose next run is still in the future.
-//  3. Checks the overlap policy before firing (see below).
-//  4. Enqueues a new job via NATSBackend.Push() using the cron's JobTemplate.
-//  5. Computes the next run time and updates the cron entry in KV.
+//  3. Creates a per-occurrence KV claim with a short owner lease.
+//  4. Enqueues the claim's stable job ID and reconciles ambiguous publication.
+//  5. Advances the cron cursor with a revision-guarded KV update.
 //
 // # Cron Expression Parsing
 //
-// Expressions are parsed with robfig/cron/v3 using a five-field parser
-// (Minute | Hour | Dom | Month | Dow | Descriptor). Timezone-aware schedules
-// are supported via the CRON_TZ= prefix when CronJob.Timezone is set.
+// Expressions are parsed by one shared robfig/cron/v3 parser using five fields
+// (Minute | Hour | Dom | Month | Dow | Descriptor). CRON_TZ is applied
+// consistently during registration and cursor advancement; UTC is the default.
 //
 // # Overlap Policy
 //

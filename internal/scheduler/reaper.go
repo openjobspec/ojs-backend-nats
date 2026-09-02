@@ -32,19 +32,19 @@
 //
 //  4. Remove active entry — Delete the job's key from "ojs-active".
 //
-//  5. Ack stale message — Acknowledge the original JetStream message via
-//     the consumer tracker so JetStream does not attempt its own redelivery.
+//  5. Publish replacement — Publish with a stable JetStream Msg-Id while the
+//     active source and a durable handoff marker still exist.
 //
-//  6. Republish — Publish the job ID to the queue's JetStream subject so it
-//     becomes available for another worker to pick up.
+//  6. Finalize source — Only after publication is confirmed, acknowledge the
+//     matching source dispatch and conditionally remove its active entry.
 //
 // # JetStream AckWait vs. Reaper
 //
 // JetStream has a native AckWait mechanism that marks un-acked messages for
-// redelivery. However, the NATS backend sets MaxDeliver=1 because retries are
-// managed through KV state and the OJS retry extension, not through JetStream
-// redelivery. This makes the reaper the primary mechanism for recovering
-// stalled jobs. JetStream AckWait serves only as a secondary safety net.
+// redelivery. The NATS backend allows unlimited delivery attempts so a process
+// crash before the job-state CAS cannot lose the durable source. KV revisions
+// ensure that only one delivery can move a job to active, while the reaper
+// handles visibility expiry after that transition.
 //
 // # Related Code
 //

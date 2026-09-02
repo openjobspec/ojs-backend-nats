@@ -3,10 +3,12 @@ package nats
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sort"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -24,23 +26,28 @@ type NATSBackend struct {
 	js jetstream.JetStream
 
 	// KV stores
-	jobs      *kv.Store
-	unique    *kv.UniqueStore
-	cronStore *kv.CronStore
-	workers   *kv.Store
-	workflows *kv.Store
-	queues    *kv.Store
-	scheduled *kv.Store
-	retry     *kv.Store
-	dead      *kv.Store
-	active    *kv.Store
-	stats     *kv.Store
+	jobs       *kv.Store
+	unique     *kv.UniqueStore
+	cronStore  *kv.CronStore
+	workers    *kv.Store
+	workflows  *kv.Store
+	queues     *kv.Store
+	scheduled  *kv.Store
+	retry      *kv.Store
+	dead       *kv.Store
+	active     *kv.Store
+	stats      *kv.Store
+	cronClaims *kv.Store
 
 	// JetStream consumer manager
 	consumers *ConsumerManager
 
-	startTime time.Time
-	cpStore   *checkpointStore
+	startTime        time.Time
+	cpStore          *checkpointStore
+	instanceID       string
+	cronLegacyCursor atomic.Uint64
+
+	publishJob func(context.Context, string, string, uint64) error
 }
 
 // New creates a new NATSBackend, connecting to NATS and setting up JetStream resources.
@@ -68,89 +75,43 @@ func New(natsURL string) (*NATSBackend, error) {
 		return nil, fmt.Errorf("setting up JetStream: %w", err)
 	}
 
-	// Open KV buckets
-	openKV := func(name string) (jetstream.KeyValue, error) {
-		bucket, err := js.KeyValue(ctx, name)
-		if err != nil {
-			return nil, fmt.Errorf("opening KV bucket %s: %w", name, err)
-		}
-		return bucket, nil
-	}
-
-	jobsKV, err := openKV(BucketJobs)
-	if err != nil {
-		nc.Close()
-		return nil, err
-	}
-	uniqueKV, err := openKV(BucketUnique)
-	if err != nil {
-		nc.Close()
-		return nil, err
-	}
-	cronKV, err := openKV(BucketCron)
-	if err != nil {
-		nc.Close()
-		return nil, err
-	}
-	workersKV, err := openKV(BucketWorkers)
-	if err != nil {
-		nc.Close()
-		return nil, err
-	}
-	workflowsKV, err := openKV(BucketWorkflows)
-	if err != nil {
-		nc.Close()
-		return nil, err
-	}
-	queuesKV, err := openKV(BucketQueues)
-	if err != nil {
-		nc.Close()
-		return nil, err
-	}
-	scheduledKV, err := openKV(BucketScheduled)
-	if err != nil {
-		nc.Close()
-		return nil, err
-	}
-	retryKV, err := openKV(BucketRetry)
-	if err != nil {
-		nc.Close()
-		return nil, err
-	}
-	deadKV, err := openKV(BucketDead)
-	if err != nil {
-		nc.Close()
-		return nil, err
-	}
-	activeKV, err := openKV(BucketActive)
-	if err != nil {
-		nc.Close()
-		return nil, err
-	}
-	statsKV, err := openKV(BucketStats)
+	buckets, err := openKVBuckets(ctx, js,
+		BucketJobs, BucketUnique, BucketCron, BucketWorkers, BucketWorkflows,
+		BucketQueues, BucketScheduled, BucketRetry, BucketDead, BucketActive, BucketStats,
+		bucketCronClaims,
+	)
 	if err != nil {
 		nc.Close()
 		return nil, err
 	}
 
-	return &NATSBackend{
-		nc:        nc,
-		js:        js,
-		jobs:      kv.NewStore(jobsKV),
-		unique:    kv.NewUniqueStore(uniqueKV),
-		cronStore: kv.NewCronStore(cronKV),
-		workers:   kv.NewStore(workersKV),
-		workflows: kv.NewStore(workflowsKV),
-		queues:    kv.NewStore(queuesKV),
-		scheduled: kv.NewStore(scheduledKV),
-		retry:     kv.NewStore(retryKV),
-		dead:      kv.NewStore(deadKV),
-		active:    kv.NewStore(activeKV),
-		stats:     kv.NewStore(statsKV),
-		consumers: NewConsumerManager(js),
-		startTime: time.Now(),
-		cpStore:   newCheckpointStore(),
-	}, nil
+	backend := &NATSBackend{
+		nc:         nc,
+		js:         js,
+		jobs:       kv.NewStore(buckets[BucketJobs]),
+		unique:     kv.NewUniqueStore(buckets[BucketUnique]),
+		cronStore:  kv.NewCronStore(buckets[BucketCron]),
+		workers:    kv.NewStore(buckets[BucketWorkers]),
+		workflows:  kv.NewStore(buckets[BucketWorkflows]),
+		queues:     kv.NewStore(buckets[BucketQueues]),
+		scheduled:  kv.NewStore(buckets[BucketScheduled]),
+		retry:      kv.NewStore(buckets[BucketRetry]),
+		dead:       kv.NewStore(buckets[BucketDead]),
+		active:     kv.NewStore(buckets[BucketActive]),
+		stats:      kv.NewStore(buckets[BucketStats]),
+		cronClaims: kv.NewStore(buckets[bucketCronClaims]),
+		consumers:  NewConsumerManager(js),
+		startTime:  time.Now(),
+		cpStore:    newCheckpointStore(),
+		instanceID: core.NewUUIDv7(),
+	}
+	backend.publishJob = func(ctx context.Context, queue, jobID string, dispatchSeq uint64) error {
+		return PublishJobDispatch(ctx, backend.js, queue, jobID, dispatchSeq)
+	}
+	if err := backend.maintainLegacyCronClaims(ctx, cronLegacyMaintenanceLimit); err != nil {
+		slog.Warn("legacy cron claim maintenance incomplete", "error", err)
+	}
+	return backend, nil
 }
 
 // Conn returns the underlying NATS connection for use by auxiliary services (e.g., pub/sub broker).
@@ -165,6 +126,9 @@ func (b *NATSBackend) Close() error {
 
 // Push enqueues a single job.
 func (b *NATSBackend) Push(ctx context.Context, job *core.Job) (*core.Job, error) {
+	if job == nil {
+		return nil, core.NewInvalidRequestError("Job is required.", nil)
+	}
 	ctx, span := ojsotel.StartJobSpan(ctx, "push", job.ID, job.Type, job.Queue)
 	defer span.End()
 
@@ -173,70 +137,33 @@ func (b *NATSBackend) Push(ctx context.Context, job *core.Job) (*core.Job, error
 	if job.ID == "" {
 		job.ID = core.NewUUIDv7()
 	}
+	if job.Queue == "" {
+		job.Queue = "default"
+	}
 
 	job.CreatedAt = core.FormatTime(now)
 	job.Attempt = 0
 
-	// Handle unique jobs
-	if job.Unique != nil {
-		fingerprint := kv.ComputeFingerprint(job)
-
-		conflict := job.Unique.OnConflict
-		if conflict == "" {
-			conflict = "reject"
-		}
-
-		existingID, err := b.unique.CheckAndSet(ctx, fingerprint, job.ID)
-		if err != nil {
-			return nil, fmt.Errorf("unique check: %w", err)
-		}
-		if existingID != "" {
-			// Check if existing job is in a relevant state
-			existingJob, infoErr := b.Info(ctx, existingID)
-			if infoErr == nil {
-				isRelevant := false
-				if len(job.Unique.States) > 0 {
-					for _, s := range job.Unique.States {
-						if s == existingJob.State {
-							isRelevant = true
-							break
-						}
-					}
-				} else {
-					isRelevant = !core.IsTerminalState(existingJob.State)
-				}
-
-				if isRelevant {
-					switch conflict {
-					case "reject":
-						return nil, &core.OJSError{
-							Code:    core.ErrCodeDuplicate,
-							Message: "A job with the same unique key already exists.",
-							Details: map[string]any{
-								"existing_job_id": existingID,
-								"unique_key":      fingerprint,
-							},
-						}
-					case "ignore":
-						existingJob.IsExisting = true
-						return existingJob, nil
-					case "replace":
-						b.Cancel(ctx, existingID)
-					}
-				}
-			}
-			// Overwrite the unique key with new job ID
-			b.unique.Release(ctx, fingerprint)
-			b.unique.CheckAndSet(ctx, fingerprint, job.ID)
-		}
+	reservation, existing, err := b.reserveUnique(ctx, job, now)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		return existing, nil
 	}
 
 	// Register queue
-	b.ensureQueue(ctx, job.Queue)
+	if err := b.ensureQueue(ctx, job.Queue); err != nil {
+		b.rollbackUnique(ctx, reservation)
+		return nil, fmt.Errorf("register queue: %w", err)
+	}
 
 	// Store rate limit config if specified
 	if job.RateLimit != nil && job.RateLimit.MaxPerSecond > 0 {
-		b.updateQueueRateLimit(ctx, job.Queue, job.RateLimit.MaxPerSecond)
+		if err := b.updateQueueRateLimit(ctx, job.Queue, job.RateLimit.MaxPerSecond); err != nil {
+			b.rollbackUnique(ctx, reservation)
+			return nil, fmt.Errorf("store queue rate limit: %w", err)
+		}
 	}
 
 	// Determine initial state
@@ -246,11 +173,30 @@ func (b *NATSBackend) Push(ctx context.Context, job *core.Job) (*core.Job, error
 			job.State = core.StateScheduled
 			job.EnqueuedAt = core.FormatTime(now)
 
-			if _, err := b.putJobState(ctx, job); err != nil {
-				return nil, fmt.Errorf("store scheduled job: %w", err)
+			_, err := b.scheduled.Create(ctx, job.ID, []byte(job.ScheduledAt))
+			if err != nil {
+				if errors.Is(err, jetstream.ErrKeyExists) {
+					b.rollbackUnique(ctx, reservation)
+					return nil, core.NewDuplicateError(job.ID)
+				}
+				existingValue, _, readErr := b.scheduled.Get(ctx, job.ID)
+				if readErr != nil || string(existingValue) != job.ScheduledAt {
+					b.rollbackUnique(ctx, reservation)
+					return nil, fmt.Errorf("index scheduled job: %w", err)
+				}
 			}
-
-			b.scheduled.Put(ctx, job.ID, []byte(job.ScheduledAt))
+			if _, err := b.createJobRecord(ctx, &jobRecord{Job: job}); err != nil {
+				if errors.Is(err, jetstream.ErrKeyExists) {
+					b.rollbackUnique(ctx, reservation)
+					return nil, core.NewDuplicateError(job.ID)
+				}
+				existing, readErr := b.getJobRecord(ctx, job.ID)
+				if readErr != nil || !sameCreatedJob(existing, job, 0, "") {
+					b.rollbackUnique(ctx, reservation)
+					return nil, fmt.Errorf("store scheduled job: %w", err)
+				}
+			}
+			b.cancelReplacedUnique(ctx, reservation)
 			return job, nil
 		}
 	}
@@ -258,14 +204,51 @@ func (b *NATSBackend) Push(ctx context.Context, job *core.Job) (*core.Job, error
 	job.State = core.StateAvailable
 	job.EnqueuedAt = core.FormatTime(now)
 
-	if _, err := b.putJobState(ctx, job); err != nil {
-		return nil, fmt.Errorf("store job: %w", err)
+	marker := handoffMarker{
+		JobID:       job.ID,
+		Queue:       job.Queue,
+		Kind:        handoffPush,
+		DispatchSeq: 1,
+		CreatedAt:   core.FormatTime(now),
+	}
+	markerRevision, err := b.createHandoff(ctx, marker)
+	if err != nil {
+		if errors.Is(err, jetstream.ErrKeyExists) {
+			b.rollbackUnique(ctx, reservation)
+			return nil, core.NewDuplicateError(job.ID)
+		}
+		existing, existingRevision, readErr := b.getHandoff(ctx, handoffKey(job.ID))
+		if readErr == nil && existing == marker {
+			markerRevision = existingRevision
+		} else {
+			b.rollbackUnique(ctx, reservation)
+			return nil, fmt.Errorf("create job dispatch handoff: %w", err)
+		}
+	}
+	record := &jobRecord{
+		Job:            job,
+		DispatchSeq:    marker.DispatchSeq,
+		DispatchSource: marker.Kind,
+	}
+	if _, err := b.createJobRecord(ctx, record); err != nil {
+		if errors.Is(err, jetstream.ErrKeyExists) {
+			_ = b.stats.DeleteRevision(ctx, handoffKey(job.ID), markerRevision)
+			b.rollbackUnique(ctx, reservation)
+			return nil, core.NewDuplicateError(job.ID)
+		}
+		existing, readErr := b.getJobRecord(ctx, job.ID)
+		if readErr != nil || !sameCreatedJob(existing, job, marker.DispatchSeq, marker.Kind) {
+			_ = b.stats.DeleteRevision(ctx, handoffKey(job.ID), markerRevision)
+			b.rollbackUnique(ctx, reservation)
+			return nil, fmt.Errorf("store job: %w", err)
+		}
 	}
 
-	if err := PublishJob(ctx, b.js, job.Queue, job.ID); err != nil {
+	if err := b.reconcileHandoff(ctx, handoffKey(job.ID)); err != nil {
 		return nil, fmt.Errorf("publish job: %w", err)
 	}
 
+	b.cancelReplacedUnique(ctx, reservation)
 	return job, nil
 }
 
@@ -292,39 +275,45 @@ func (b *NATSBackend) Fetch(ctx context.Context, queues []string, count int, wor
 
 		remaining := count - len(jobs)
 
-		jobIDs, err := b.consumers.FetchMessages(ctx, queue, remaining)
+		fetchedMessages, err := b.consumers.FetchMessages(ctx, queue, remaining)
 		if err != nil {
 			continue
 		}
 
-		for _, jobID := range jobIDs {
-			job, err := b.getJobState(ctx, jobID)
+		for _, fetched := range fetchedMessages {
+			record, err := b.getJobRecord(ctx, fetched.JobID)
 			if err != nil {
-				b.consumers.AckMessage(jobID)
+				if errors.Is(err, jetstream.ErrKeyNotFound) || errors.Is(err, jetstream.ErrKeyDeleted) {
+					_ = b.consumers.AckFetched(ctx, fetched)
+				} else {
+					_ = b.consumers.NakFetched(fetched)
+				}
 				continue
 			}
+			job := record.Job
 
 			// Check expiry
 			if job.ExpiresAt != "" {
 				expTime, err := time.Parse(time.RFC3339, job.ExpiresAt)
 				if err == nil && now.After(expTime) {
 					job.State = core.StateDiscarded
-					if _, err := b.putJobState(ctx, job); err != nil {
-						b.consumers.AckMessage(jobID)
-						continue
+					job.CompletedAt = core.FormatTime(now)
+					if _, err := b.updateJobRecord(ctx, record); err == nil {
+						_ = b.consumers.AckFetched(ctx, fetched)
+						b.advanceWorkflow(ctx, job.ID, core.StateDiscarded, nil)
+					} else if errors.Is(err, jetstream.ErrKeyExists) {
+						_ = b.consumers.AckFetched(ctx, fetched)
+					} else {
+						_ = b.consumers.NakFetched(fetched)
 					}
-					b.consumers.AckMessage(jobID)
 					continue
 				}
 			}
 
 			if job.State != core.StateAvailable {
-				b.consumers.AckMessage(jobID)
+				_ = b.consumers.AckFetched(ctx, fetched)
 				continue
 			}
-
-			job.State = core.StateActive
-			job.StartedAt = core.FormatTime(now)
 
 			effectiveVisTimeout := visibilityTimeoutMs
 			if effectiveVisTimeout <= 0 && job.VisibilityTimeoutMs != nil {
@@ -340,24 +329,52 @@ func (b *NATSBackend) Fetch(ctx context.Context, queues []string, count int, wor
 				Queue:              queue,
 				VisibilityDeadline: core.FormatTime(deadline),
 				WorkerID:           workerID,
+				ClaimedAt:          core.FormatTime(now),
+				JobRevision:        record.Revision,
+				DispatchSeq:        record.DispatchSeq,
 			}
 			activeData, marshalErr := json.Marshal(activeInfo)
 			if marshalErr != nil {
-				slog.Warn("nats fetch: failed to marshal active info", "job_id", jobID, "error", marshalErr)
-				b.consumers.AckMessage(jobID)
-				continue
-			}
-			if _, err := b.active.Put(ctx, jobID, activeData); err != nil {
-				b.consumers.AckMessage(jobID)
+				slog.Warn("nats fetch: failed to marshal active info", "job_id", job.ID, "error", marshalErr)
+				_ = b.consumers.AckFetched(ctx, fetched)
 				continue
 			}
 
-			if _, err := b.putJobState(ctx, job); err != nil {
-				b.active.Delete(ctx, jobID)
-				b.consumers.AckMessage(jobID)
+			activeRevision, err := b.active.Create(ctx, job.ID, activeData)
+			if errors.Is(err, jetstream.ErrKeyExists) {
+				var existing activeJobInfo
+				existingRevision, getErr := b.active.GetJSON(ctx, job.ID, &existing)
+				if getErr != nil {
+					continue
+				}
+				if existing.DispatchSeq == record.DispatchSeq && !activeClaimStale(existing, now) {
+					_ = b.consumers.AckFetched(ctx, fetched)
+					continue
+				}
+				activeRevision, err = b.active.Update(ctx, job.ID, activeData, existingRevision)
+			}
+			if err != nil {
+				if errors.Is(err, jetstream.ErrKeyExists) {
+					_ = b.consumers.AckFetched(ctx, fetched)
+				}
 				continue
 			}
-			b.recordFetchTime(ctx, queue, now)
+
+			job.State = core.StateActive
+			job.StartedAt = core.FormatTime(now)
+			job.WorkerID = workerID
+			job.Attempt++
+			if _, err := b.updateJobRecord(ctx, record); err != nil {
+				if errors.Is(err, jetstream.ErrKeyExists) {
+					_ = b.active.DeleteRevision(ctx, job.ID, activeRevision)
+					_ = b.consumers.AckFetched(ctx, fetched)
+				}
+				continue
+			}
+			b.consumers.Track(job.ID, fetched.Msg, record.DispatchSeq)
+			if err := b.recordFetchTime(ctx, queue, now); err != nil {
+				slog.Warn("nats fetch: failed to record queue fetch time", "queue", queue, "error", err)
+			}
 
 			jobs = append(jobs, job)
 		}
@@ -371,10 +388,11 @@ func (b *NATSBackend) Ack(ctx context.Context, jobID string, result []byte) (*co
 	ctx, span := ojsotel.StartJobSpan(ctx, "ack", jobID, "", "")
 	defer span.End()
 
-	job, err := b.getJobState(ctx, jobID)
+	record, err := b.getJobRecord(ctx, jobID)
 	if err != nil {
 		return nil, core.NewNotFoundError("Job", jobID)
 	}
+	job := record.Job
 
 	if job.State != core.StateActive {
 		return nil, core.NewConflictError(
@@ -392,33 +410,23 @@ func (b *NATSBackend) Ack(ctx context.Context, jobID string, result []byte) (*co
 	job.CompletedAt = now
 	job.Error = nil
 
-	if result != nil && len(result) > 0 {
+	if len(result) > 0 {
 		job.Result = json.RawMessage(result)
 	}
 
-	if _, err := b.putJobState(ctx, job); err != nil {
-		return nil, core.NewInternalError(fmt.Sprintf("updating completed job state: %v", err))
+	if _, err := b.updateJobRecord(ctx, record); err != nil {
+		return nil, b.jobTransitionError(ctx, "acknowledge", jobID, core.StateActive, err)
 	}
-	if err := b.active.Delete(ctx, jobID); err != nil {
-		return nil, core.NewInternalError(fmt.Sprintf("removing active job state: %v", err))
-	}
-	if err := b.consumers.AckMessage(jobID); err != nil {
-		return nil, core.NewInternalError(fmt.Sprintf("acking job message: %v", err))
-	}
+	b.cleanupActiveSource(ctx, jobID, record.DispatchSeq)
 	b.incrementCompleted(ctx, job.Queue)
 	b.advanceWorkflow(ctx, jobID, core.StateCompleted, result)
 
-	updatedJob, infoErr := b.Info(ctx, jobID)
-	if infoErr != nil {
-		updatedJob = job
-	}
-
 	return &core.AckResponse{
 		Acknowledged: true,
-		ID:        jobID,
+		ID:           jobID,
 		State:        core.StateCompleted,
 		CompletedAt:  now,
-		Job:          updatedJob,
+		Job:          job,
 	}, nil
 }
 
@@ -427,10 +435,11 @@ func (b *NATSBackend) Nack(ctx context.Context, jobID string, jobErr *core.JobEr
 	ctx, span := ojsotel.StartJobSpan(ctx, "nack", jobID, "", "")
 	defer span.End()
 
-	job, err := b.getJobState(ctx, jobID)
+	record, err := b.getJobRecord(ctx, jobID)
 	if err != nil {
 		return nil, core.NewNotFoundError("Job", jobID)
 	}
+	job := record.Job
 
 	if job.State != core.StateActive {
 		return nil, core.NewConflictError(
@@ -450,67 +459,46 @@ func (b *NATSBackend) Nack(ctx context.Context, jobID string, jobErr *core.JobEr
 	}
 
 	if requeue {
-		job.State = core.StateAvailable
-		job.StartedAt = ""
-		job.EnqueuedAt = core.FormatTime(now)
-
-		if _, err := b.putJobState(ctx, job); err != nil {
-			return nil, core.NewInternalError(fmt.Sprintf("updating requeued job state: %v", err))
-		}
-		if err := b.active.Delete(ctx, jobID); err != nil {
-			return nil, core.NewInternalError(fmt.Sprintf("removing active state for requeued job: %v", err))
-		}
-		if err := b.consumers.AckMessage(jobID); err != nil {
-			return nil, core.NewInternalError(fmt.Sprintf("acking requeued job message: %v", err))
-		}
-		if err := PublishJob(ctx, b.js, job.Queue, jobID); err != nil {
-			return nil, core.NewInternalError(fmt.Sprintf("republishing requeued job: %v", err))
+		targetDispatchSeq := record.DispatchSeq + 1
+		if err := b.prepareActiveHandoff(ctx, record, handoffNackRequeue); err != nil {
+			return nil, core.NewInternalError(fmt.Sprintf("durably requeueing job: %v", err))
 		}
 
-		retJob, _ := b.Info(ctx, jobID)
+		retRecord, infoErr := b.getJobRecord(ctx, jobID)
+		if infoErr != nil {
+			return nil, core.NewNotFoundError("Job", jobID)
+		}
+		retJob := retRecord.Job
+		requeued := retRecord.DispatchSeq == targetDispatchSeq &&
+			retRecord.DispatchSource == handoffNackRequeue &&
+			(retJob.State == core.StateAvailable || retJob.State == core.StateActive)
+		if !requeued {
+			return nil, core.NewConflictError(
+				fmt.Sprintf("Cannot requeue job because its state changed to '%s'.", retJob.State),
+				map[string]any{"job_id": jobID, "current_state": retJob.State},
+			)
+		}
 		return &core.NackResponse{
-			ID:       jobID,
-			State:       core.StateAvailable,
+			ID:          jobID,
+			State:       retJob.State,
 			Attempt:     job.Attempt,
 			MaxAttempts: maxAttempts,
 			Job:         retJob,
 		}, nil
 	}
 
-	newAttempt := job.Attempt + 1
+	currentAttempt := job.Attempt
 
-	var errJSON []byte
-	if jobErr != nil {
-		errObj := map[string]any{
-			"message": jobErr.Message,
-			"attempt": job.Attempt,
-		}
-		if jobErr.Code != "" {
-			errObj["type"] = jobErr.Code
-		}
-		if jobErr.Type != "" {
-			errObj["type"] = jobErr.Type
-		}
-		if jobErr.Retryable != nil {
-			errObj["retryable"] = *jobErr.Retryable
-		}
-		if jobErr.Details != nil {
-			errObj["details"] = jobErr.Details
-		}
-		errJSON, err = json.Marshal(errObj)
-		if err != nil {
-			return nil, core.NewInternalError(fmt.Sprintf("encoding job error payload: %v", err))
-		}
+	errJSON, err := buildJobErrorPayload(jobErr, job.Attempt)
+	if err != nil {
+		return nil, core.NewInternalError(fmt.Sprintf("encoding job error payload: %v", err))
 	}
 
 	if errJSON != nil {
 		job.Errors = append(job.Errors, json.RawMessage(errJSON))
 	}
 
-	isNonRetryable := false
-	if jobErr != nil && jobErr.Retryable != nil && !*jobErr.Retryable {
-		isNonRetryable = true
-	}
+	isNonRetryable := jobErr != nil && jobErr.Retryable != nil && !*jobErr.Retryable
 
 	if !isNonRetryable && jobErr != nil && job.Retry != nil {
 		for _, pattern := range job.Retry.NonRetryableErrors {
@@ -530,28 +518,22 @@ func (b *NATSBackend) Nack(ctx context.Context, jobID string, jobErr *core.JobEr
 		onExhaustion = job.Retry.OnExhaustion
 	}
 
-	if isNonRetryable || newAttempt >= maxAttempts {
+	if isNonRetryable || currentAttempt >= maxAttempts {
 		discardedAt := core.FormatTime(now)
 		job.State = core.StateDiscarded
 		job.CompletedAt = discardedAt
-		job.Attempt = newAttempt
 		if errJSON != nil {
 			job.Error = json.RawMessage(errJSON)
 		}
 
-		if _, err := b.putJobState(ctx, job); err != nil {
-			return nil, core.NewInternalError(fmt.Sprintf("updating discarded job state: %v", err))
+		if _, err := b.updateJobRecord(ctx, record); err != nil {
+			return nil, b.jobTransitionError(ctx, "discard", jobID, core.StateActive, err)
 		}
-		if err := b.active.Delete(ctx, jobID); err != nil {
-			return nil, core.NewInternalError(fmt.Sprintf("removing active state for discarded job: %v", err))
-		}
-		if err := b.consumers.AckMessage(jobID); err != nil {
-			return nil, core.NewInternalError(fmt.Sprintf("acking discarded job message: %v", err))
-		}
+		b.cleanupActiveSource(ctx, jobID, record.DispatchSeq)
 
 		if onExhaustion == "dead_letter" {
 			if _, err := b.dead.Put(ctx, jobID, []byte(core.FormatTime(now))); err != nil {
-				return nil, core.NewInternalError(fmt.Sprintf("indexing dead letter job: %v", err))
+				slog.Warn("nats: failed to index discarded job in dead letter", "job_id", jobID, "error", err)
 			}
 		}
 
@@ -559,44 +541,39 @@ func (b *NATSBackend) Nack(ctx context.Context, jobID string, jobErr *core.JobEr
 
 		retJob, _ := b.Info(ctx, jobID)
 		return &core.NackResponse{
-			ID:       jobID,
+			ID:          jobID,
 			State:       core.StateDiscarded,
-			Attempt:     newAttempt,
+			Attempt:     currentAttempt,
 			MaxAttempts: maxAttempts,
+			CompletedAt: discardedAt,
 			DiscardedAt: discardedAt,
 			Job:         retJob,
 		}, nil
 	}
 
-	backoff := core.CalculateBackoff(job.Retry, newAttempt)
+	backoff := core.CalculateBackoff(job.Retry, currentAttempt)
 	backoffMs := backoff.Milliseconds()
 	nextAttemptAt := now.Add(backoff)
 
 	job.State = core.StateRetryable
-	job.Attempt = newAttempt
 	job.RetryDelayMs = &backoffMs
 	if errJSON != nil {
 		job.Error = json.RawMessage(errJSON)
 	}
 
-	if _, err := b.putJobState(ctx, job); err != nil {
-		return nil, core.NewInternalError(fmt.Sprintf("updating retryable job state: %v", err))
-	}
-	if err := b.active.Delete(ctx, jobID); err != nil {
-		return nil, core.NewInternalError(fmt.Sprintf("removing active state for retryable job: %v", err))
-	}
-	if err := b.consumers.AckMessage(jobID); err != nil {
-		return nil, core.NewInternalError(fmt.Sprintf("acking retryable job message: %v", err))
-	}
 	if _, err := b.retry.Put(ctx, jobID, []byte(core.FormatTime(nextAttemptAt))); err != nil {
 		return nil, core.NewInternalError(fmt.Sprintf("indexing retryable job: %v", err))
 	}
+	if _, err := b.updateJobRecord(ctx, record); err != nil {
+		return nil, b.jobTransitionError(ctx, "retry", jobID, core.StateActive, err)
+	}
+	b.cleanupActiveSource(ctx, jobID, record.DispatchSeq)
 
 	retJob, _ := b.Info(ctx, jobID)
 	return &core.NackResponse{
-		ID:         jobID,
+		ID:            jobID,
 		State:         core.StateRetryable,
-		Attempt:       newAttempt,
+		Attempt:       currentAttempt,
 		MaxAttempts:   maxAttempts,
 		NextAttemptAt: core.FormatTime(nextAttemptAt),
 		Job:           retJob,
@@ -614,10 +591,11 @@ func (b *NATSBackend) Info(ctx context.Context, jobID string) (*core.Job, error)
 
 // Cancel cancels a job.
 func (b *NATSBackend) Cancel(ctx context.Context, jobID string) (*core.Job, error) {
-	job, err := b.getJobState(ctx, jobID)
+	record, err := b.getJobRecord(ctx, jobID)
 	if err != nil {
 		return nil, core.NewNotFoundError("Job", jobID)
 	}
+	job := record.Job
 
 	if core.IsTerminalState(job.State) {
 		return nil, core.NewConflictError(
@@ -629,25 +607,18 @@ func (b *NATSBackend) Cancel(ctx context.Context, jobID string) (*core.Job, erro
 		)
 	}
 
+	previousState := job.State
 	now := core.NowFormatted()
 	job.State = core.StateCancelled
 	job.CancelledAt = now
 
-	if _, err := b.putJobState(ctx, job); err != nil {
-		return nil, core.NewInternalError(fmt.Sprintf("updating cancelled job state: %v", err))
+	if _, err := b.updateJobRecord(ctx, record); err != nil {
+		return nil, b.jobTransitionError(ctx, "cancel", jobID, previousState, err)
 	}
-	if err := b.active.Delete(ctx, jobID); err != nil {
-		return nil, core.NewInternalError(fmt.Sprintf("removing active state for cancelled job: %v", err))
-	}
-	if err := b.scheduled.Delete(ctx, jobID); err != nil {
-		return nil, core.NewInternalError(fmt.Sprintf("removing scheduled index for cancelled job: %v", err))
-	}
-	if err := b.retry.Delete(ctx, jobID); err != nil {
-		return nil, core.NewInternalError(fmt.Sprintf("removing retry index for cancelled job: %v", err))
-	}
-	if err := b.consumers.AckMessage(jobID); err != nil {
-		return nil, core.NewInternalError(fmt.Sprintf("acking cancelled job message: %v", err))
-	}
+	b.cleanupActiveSource(ctx, jobID, record.DispatchSeq)
+	cleanupIndex(ctx, b.scheduled, jobID, "scheduled")
+	cleanupIndex(ctx, b.retry, jobID, "retry")
+	b.advanceWorkflow(ctx, jobID, core.StateCancelled, nil)
 
 	return job, nil
 }
@@ -735,14 +706,21 @@ func (b *NATSBackend) Heartbeat(ctx context.Context, workerID string, activeJobs
 	}
 	workerData, marshalErr := json.Marshal(workerInfo)
 	if marshalErr != nil {
-		slog.Warn("nats heartbeat: failed to marshal worker info", "worker_id", workerID, "error", marshalErr)
+		return nil, core.NewInternalError(fmt.Sprintf("encode worker heartbeat: %v", marshalErr))
 	}
-	b.workers.Put(ctx, workerID, workerData)
+	if _, err := b.workers.Put(ctx, workerID, workerData); err != nil {
+		return nil, core.NewInternalError(fmt.Sprintf("store worker heartbeat: %v", err))
+	}
 
 	// Extend visibility for active jobs
 	for _, jobID := range activeJobs {
 		job, err := b.getJobState(ctx, jobID)
 		if err != nil || job.State != core.StateActive {
+			continue
+		}
+		var current activeJobInfo
+		activeRevision, err := b.active.GetJSON(ctx, jobID, &current)
+		if err != nil {
 			continue
 		}
 
@@ -753,14 +731,21 @@ func (b *NATSBackend) Heartbeat(ctx context.Context, workerID string, activeJobs
 			Queue:              job.Queue,
 			VisibilityDeadline: core.FormatTime(deadline),
 			WorkerID:           workerID,
+			ClaimedAt:          current.ClaimedAt,
+			JobRevision:        current.JobRevision,
+			DispatchSeq:        current.DispatchSeq,
 		}
 		activeData, marshalErr := json.Marshal(activeInfo)
 		if marshalErr != nil {
 			slog.Warn("nats heartbeat: failed to marshal active info", "job_id", jobID, "error", marshalErr)
 			continue
 		}
-		b.active.Put(ctx, jobID, activeData)
-		b.consumers.InProgress(jobID)
+		if _, err := b.active.Update(ctx, jobID, activeData, activeRevision); err != nil {
+			continue
+		}
+		if err := b.consumers.InProgress(jobID); err != nil {
+			continue
+		}
 
 		extended = append(extended, jobID)
 	}
@@ -806,27 +791,16 @@ func (b *NATSBackend) PushBatch(ctx context.Context, jobs []*core.Job) ([]*core.
 		}
 	}
 
-	now := time.Now()
-
+	results := make([]*core.Job, 0, len(jobs))
 	for i, job := range jobs {
-		if job.ID == "" {
-			job.ID = core.NewUUIDv7()
+		created, err := b.Push(ctx, job)
+		if err != nil {
+			return results, fmt.Errorf("push batch job %d (%s): %w", i, job.ID, err)
 		}
-		job.State = core.StateAvailable
-		job.Attempt = 0
-		job.CreatedAt = core.FormatTime(now)
-		job.EnqueuedAt = core.FormatTime(now)
-
-		if _, err := b.putJobState(ctx, job); err != nil {
-			return jobs[:i], fmt.Errorf("store batch job %d (%s): %w", i, job.ID, err)
-		}
-		b.ensureQueue(ctx, job.Queue)
-		if err := PublishJob(ctx, b.js, job.Queue, job.ID); err != nil {
-			return jobs[:i+1], fmt.Errorf("publish batch job %d (%s): %w", i, job.ID, err)
-		}
+		results = append(results, created)
 	}
 
-	return jobs, nil
+	return results, nil
 }
 
 // QueueStats returns statistics for a queue.
