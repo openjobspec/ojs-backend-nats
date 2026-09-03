@@ -39,6 +39,9 @@ func TestBackendPushFetchAckFlow(t *testing.T) {
 	if fetched[0].ID != created.ID {
 		t.Fatalf("Fetch() returned job ID %s, want %s", fetched[0].ID, created.ID)
 	}
+	if fetched[0].Attempt != 1 {
+		t.Fatalf("Fetch() attempt = %d, want 1", fetched[0].Attempt)
+	}
 
 	if _, err := backend.Ack(ctx, created.ID, json.RawMessage(`{"ok":true}`)); err != nil {
 		t.Fatalf("Ack() error = %v", err)
@@ -98,6 +101,9 @@ func TestBackendNackRetryFlow(t *testing.T) {
 	if nackResp.State != core.StateRetryable {
 		t.Fatalf("Nack().State = %q, want %q", nackResp.State, core.StateRetryable)
 	}
+	if nackResp.Attempt != 1 {
+		t.Fatalf("Nack().Attempt = %d, want 1", nackResp.Attempt)
+	}
 
 	time.Sleep(25 * time.Millisecond)
 	if err := backend.PromoteRetries(ctx); err != nil {
@@ -113,6 +119,9 @@ func TestBackendNackRetryFlow(t *testing.T) {
 	}
 	if refetched[0].ID != created.ID {
 		t.Fatalf("Retry fetch returned %s, want %s", refetched[0].ID, created.ID)
+	}
+	if refetched[0].Attempt != 2 {
+		t.Fatalf("Retry fetch attempt = %d, want 2", refetched[0].Attempt)
 	}
 }
 
@@ -154,6 +163,9 @@ func TestBackendDeadLetterLifecycle(t *testing.T) {
 	}
 	if nackResp.State != core.StateDiscarded {
 		t.Fatalf("Nack().State = %q, want %q", nackResp.State, core.StateDiscarded)
+	}
+	if nackResp.CompletedAt == "" || nackResp.DiscardedAt == "" {
+		t.Fatalf("discard response missing terminal timestamps: %+v", nackResp)
 	}
 
 	deadJobs, total, err := backend.ListDeadLetter(ctx, 50, 0)
@@ -212,12 +224,15 @@ func TestBackendFireCronJobs_EnqueuesDueJob(t *testing.T) {
 	if registered.NextRunAt == "" {
 		t.Fatal("RegisterCron() returned empty next_run_at")
 	}
+	t.Cleanup(func() {
+		_, _ = backend.DeleteCron(context.Background(), cronName)
+	})
 
 	stored, err := backend.cronStore.Get(ctx, cronName)
 	if err != nil {
 		t.Fatalf("cronStore.Get() error = %v", err)
 	}
-	stored.NextRunAt = core.FormatTime(time.Now().Add(-2 * time.Second))
+	stored.NextRunAt = core.FormatTime(time.Now().UTC().Truncate(time.Minute))
 	if err := backend.cronStore.Register(ctx, stored); err != nil {
 		t.Fatalf("cronStore.Register() error = %v", err)
 	}

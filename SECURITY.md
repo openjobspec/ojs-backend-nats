@@ -10,4 +10,4 @@ If you discover a security vulnerability, please report it privately using GitHu
 ## Supported versions
 
 This project is currently pre-1.0.
-Security fixes are applied to the `main` branch and included in the next tagged release.
+Security fixes are applied to the `0.5.x` release line and the `main` branch.

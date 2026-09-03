@@ -8,6 +8,11 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/propagation"
+	semconv "go.opentelemetry.io/otel/semconv/v1.24.0"
+	"go.opentelemetry.io/otel/trace"
 
 	commonapi "github.com/openjobspec/ojs-go-backend-common/api"
 	commoncore "github.com/openjobspec/ojs-go-backend-common/core"
@@ -27,27 +32,15 @@ func NewRouter(backend core.Backend, cfgs ...Config) http.Handler {
 	if len(cfgs) > 0 {
 		cfg = cfgs[0]
 	}
-	return NewRouterWithRealtime(backend, cfg, nil, nil)
+	return NewRouterWithRealtime(backend, &cfg, nil, nil)
 }
 
 // NewRouterWithRealtime creates and configures the HTTP router with all OJS routes
 // including real-time SSE endpoints.
-func NewRouterWithRealtime(backend core.Backend, cfg Config, publisher core.EventPublisher, subscriber core.EventSubscriber) http.Handler {
+func NewRouterWithRealtime(backend core.Backend, cfg *Config, publisher core.EventPublisher, subscriber core.EventSubscriber) http.Handler {
 	r := chi.NewRouter()
 
-	// Middleware
-	r.Use(middleware.Recoverer)
-	r.Use(ojsotel.HTTPMiddleware)
-	r.Use(metricsMiddleware)
-	r.Use(api.OJSHeaders)
-	r.Use(api.RequestLogger)
-	r.Use(api.LimitBody)
-	r.Use(api.ValidateContentType)
-
-	// Optional API key authentication
-	if cfg.APIKey != "" {
-		r.Use(api.KeyAuth(cfg.APIKey, "/metrics", "/ojs/v1/health"))
-	}
+	registerMiddleware(r, cfg)
 
 	// Prometheus metrics endpoint
 	r.Handle("/metrics", promhttp.Handler())
@@ -66,65 +59,114 @@ func NewRouterWithRealtime(backend core.Backend, cfg Config, publisher core.Even
 	schemaReg := commoncore.NewMemorySchemaRegistry()
 	jobHandler.SetSchemaRegistry(schemaReg)
 
-	// Wire event publisher into handlers
+	// Wire event publishing and ensure a subscriber exists for real-time routes.
+	subscriber = wireEvents(jobHandler, workerHandler, publisher, subscriber)
+
+	registerSystemRoutes(r, systemHandler)
+	registerJobRoutes(r, jobHandler, batchHandler)
+	registerWorkerRoutes(r, workerHandler)
+	registerQueueRoutes(r, queueHandler)
+	registerDeadLetterRoutes(r, deadLetterHandler)
+	registerCronRoutes(r, cronHandler)
+	registerWorkflowRoutes(r, workflowHandler)
+	registerSchemaRoutes(r)
+	registerAdminRoutes(r, api.NewAdminHandler(backend))
+	registerAdminUIRoutes(r)
+
+	// API documentation (Swagger UI)
+	commonapi.RegisterDocsRoutes(r, api.OpenAPISpec)
+
+	registerRealtimeRoutes(r, backend, subscriber)
+
+	return r
+}
+
+// registerMiddleware installs the shared middleware chain, including optional
+// API-key authentication. It must run before any routes are registered.
+func registerMiddleware(r chi.Router, cfg *Config) {
+	r.Use(middleware.Recoverer)
+	r.Use(tracingMiddleware)
+	r.Use(metricsMiddleware)
+	r.Use(api.OJSHeaders)
+	r.Use(api.RequestLogger)
+	r.Use(api.LimitBody)
+	r.Use(api.ValidateContentType)
+
+	if cfg.APIKey != "" {
+		r.Use(api.KeyAuth(cfg.APIKey, "/metrics", "/ojs/v1/health"))
+	}
+}
+
+// wireEvents connects the job/worker handlers to an event publisher and returns
+// the subscriber to use for real-time routes, bootstrapping an in-memory event
+// bus when the backend provides no native pub/sub.
+func wireEvents(jobHandler *api.JobHandler, workerHandler *api.WorkerHandler, publisher core.EventPublisher, subscriber core.EventSubscriber) core.EventSubscriber {
 	if publisher != nil {
 		jobHandler.SetEventPublisher(publisher)
 		workerHandler.SetEventPublisher(publisher)
 	}
 
-	// Auto-create event bus for real-time support when no native pub/sub
 	if subscriber == nil {
 		bus := events.NewBus(events.BusConfig{BufferSize: 256})
 		if publisher == nil {
-			publisher = bus
 			jobHandler.SetEventPublisher(bus)
 			workerHandler.SetEventPublisher(bus)
 		}
 		subscriber = bus
 	}
 
-	// System endpoints
-	r.Get("/ojs/manifest", systemHandler.Manifest)
-	r.Get("/ojs/v1/health", systemHandler.Health)
-r.Get("/healthz", systemHandler.Healthz)
-r.Get("/readyz", systemHandler.Readyz)
+	return subscriber
+}
 
-	// Job endpoints
+func registerSystemRoutes(r chi.Router, h *api.SystemHandler) {
+	r.Get("/ojs/manifest", h.Manifest)
+	r.Get("/ojs/v1/health", h.Health)
+	r.Get("/healthz", h.Healthz)
+	r.Get("/readyz", h.Readyz)
+}
+
+func registerJobRoutes(r chi.Router, jobHandler *api.JobHandler, batchHandler *api.BatchHandler) {
 	r.Post("/ojs/v1/jobs", jobHandler.Create)
 	r.Get("/ojs/v1/jobs/{id}", jobHandler.Get)
 	r.Delete("/ojs/v1/jobs/{id}", jobHandler.Cancel)
 
 	// Batch enqueue
 	r.Post("/ojs/v1/jobs/batch", batchHandler.Create)
+}
 
-	// Worker endpoints
-	r.Post("/ojs/v1/workers/fetch", workerHandler.Fetch)
-	r.Post("/ojs/v1/workers/ack", workerHandler.Ack)
-	r.Post("/ojs/v1/workers/nack", workerHandler.Nack)
-	r.Post("/ojs/v1/workers/heartbeat", workerHandler.Heartbeat)
+func registerWorkerRoutes(r chi.Router, h *api.WorkerHandler) {
+	r.Post("/ojs/v1/workers/fetch", h.Fetch)
+	r.Post("/ojs/v1/workers/ack", h.Ack)
+	r.Post("/ojs/v1/workers/nack", h.Nack)
+	r.Post("/ojs/v1/workers/heartbeat", h.Heartbeat)
+}
 
-	// Queue endpoints
-	r.Get("/ojs/v1/queues", queueHandler.List)
-	r.Get("/ojs/v1/queues/{name}/stats", queueHandler.Stats)
-	r.Post("/ojs/v1/queues/{name}/pause", queueHandler.Pause)
-	r.Post("/ojs/v1/queues/{name}/resume", queueHandler.Resume)
+func registerQueueRoutes(r chi.Router, h *api.QueueHandler) {
+	r.Get("/ojs/v1/queues", h.List)
+	r.Get("/ojs/v1/queues/{name}/stats", h.Stats)
+	r.Post("/ojs/v1/queues/{name}/pause", h.Pause)
+	r.Post("/ojs/v1/queues/{name}/resume", h.Resume)
+}
 
-	// Dead letter endpoints
-	r.Get("/ojs/v1/dead-letter", deadLetterHandler.List)
-	r.Post("/ojs/v1/dead-letter/{id}/retry", deadLetterHandler.Retry)
-	r.Delete("/ojs/v1/dead-letter/{id}", deadLetterHandler.Delete)
+func registerDeadLetterRoutes(r chi.Router, h *api.DeadLetterHandler) {
+	r.Get("/ojs/v1/dead-letter", h.List)
+	r.Post("/ojs/v1/dead-letter/{id}/retry", h.Retry)
+	r.Delete("/ojs/v1/dead-letter/{id}", h.Delete)
+}
 
-	// Cron endpoints
-	r.Get("/ojs/v1/cron", cronHandler.List)
-	r.Post("/ojs/v1/cron", cronHandler.Register)
-	r.Delete("/ojs/v1/cron/{name}", cronHandler.Delete)
+func registerCronRoutes(r chi.Router, h *api.CronHandler) {
+	r.Get("/ojs/v1/cron", h.List)
+	r.Post("/ojs/v1/cron", h.Register)
+	r.Delete("/ojs/v1/cron/{name}", h.Delete)
+}
 
-	// Workflow endpoints
-	r.Post("/ojs/v1/workflows", workflowHandler.Create)
-	r.Get("/ojs/v1/workflows/{id}", workflowHandler.Get)
-	r.Delete("/ojs/v1/workflows/{id}", workflowHandler.Cancel)
+func registerWorkflowRoutes(r chi.Router, h *api.WorkflowHandler) {
+	r.Post("/ojs/v1/workflows", h.Create)
+	r.Get("/ojs/v1/workflows/{id}", h.Get)
+	r.Delete("/ojs/v1/workflows/{id}", h.Cancel)
+}
 
-	// Schema registry API
+func registerSchemaRoutes(r chi.Router) {
 	schemaRegistry := registry.NewSchemaRegistry()
 	schemaHandler := registry.NewSchemaHandler(schemaRegistry)
 	r.Post("/ojs/v1/schemas", schemaHandler.HandleRegister)
@@ -135,34 +177,36 @@ r.Get("/readyz", systemHandler.Readyz)
 	r.Put("/ojs/v1/schemas/{jobType}/compatibility", schemaHandler.HandleSetCompatibility)
 	r.Delete("/ojs/v1/schemas/{jobType}", schemaHandler.HandleDelete)
 	r.Delete("/ojs/v1/schemas/{jobType}/versions/{version}", schemaHandler.HandleDelete)
+}
 
-	// Admin API endpoints (control plane)
-	adminHandler := api.NewAdminHandler(backend)
-	r.Get("/ojs/v1/admin/stats", adminHandler.Stats)
-	r.Get("/ojs/v1/admin/queues", adminHandler.ListQueues)
-	r.Get("/ojs/v1/admin/queues/{name}", adminHandler.GetQueue)
-	r.Post("/ojs/v1/admin/queues/{name}/pause", adminHandler.PauseQueue)
-	r.Post("/ojs/v1/admin/queues/{name}/resume", adminHandler.ResumeQueue)
-	r.Get("/ojs/v1/admin/jobs", adminHandler.ListJobs)
-	r.Get("/ojs/v1/admin/jobs/{id}", adminHandler.GetJob)
-	r.Post("/ojs/v1/admin/jobs/{id}/retry", adminHandler.RetryJob)
-	r.Post("/ojs/v1/admin/jobs/{id}/cancel", adminHandler.CancelJob)
-	r.Post("/ojs/v1/admin/jobs/bulk/retry", adminHandler.BulkRetry)
-	r.Get("/ojs/v1/admin/workers", adminHandler.ListWorkers)
-	r.Post("/ojs/v1/admin/workers/{id}/quiet", adminHandler.QuietWorker)
-	r.Get("/ojs/v1/admin/dead-letter", adminHandler.ListDeadLetter)
-	r.Get("/ojs/v1/admin/dead-letter/stats", adminHandler.DeadLetterStats)
-	r.Post("/ojs/v1/admin/dead-letter/{id}/retry", adminHandler.RetryDeadLetter)
-	r.Delete("/ojs/v1/admin/dead-letter/{id}", adminHandler.DeleteDeadLetter)
-	r.Post("/ojs/v1/admin/dead-letter/retry", adminHandler.BulkRetryDeadLetter)
+func registerAdminRoutes(r chi.Router, h *api.AdminHandler) {
+	r.Get("/ojs/v1/admin/stats", h.Stats)
+	r.Get("/ojs/v1/admin/queues", h.ListQueues)
+	r.Get("/ojs/v1/admin/queues/{name}", h.GetQueue)
+	r.Post("/ojs/v1/admin/queues/{name}/pause", h.PauseQueue)
+	r.Post("/ojs/v1/admin/queues/{name}/resume", h.ResumeQueue)
+	r.Get("/ojs/v1/admin/jobs", h.ListJobs)
+	r.Get("/ojs/v1/admin/jobs/{id}", h.GetJob)
+	r.Post("/ojs/v1/admin/jobs/{id}/retry", h.RetryJob)
+	r.Post("/ojs/v1/admin/jobs/{id}/cancel", h.CancelJob)
+	r.Post("/ojs/v1/admin/jobs/bulk/retry", h.BulkRetry)
+	r.Get("/ojs/v1/admin/workers", h.ListWorkers)
+	r.Post("/ojs/v1/admin/workers/{id}/quiet", h.QuietWorker)
+	r.Get("/ojs/v1/admin/dead-letter", h.ListDeadLetter)
+	r.Get("/ojs/v1/admin/dead-letter/stats", h.DeadLetterStats)
+	r.Post("/ojs/v1/admin/dead-letter/{id}/retry", h.RetryDeadLetter)
+	r.Delete("/ojs/v1/admin/dead-letter/{id}", h.DeleteDeadLetter)
+	r.Post("/ojs/v1/admin/dead-letter/retry", h.BulkRetryDeadLetter)
+}
 
-	// Admin UI
+func registerAdminUIRoutes(r chi.Router) {
 	r.Handle("/ojs/admin", http.RedirectHandler("/ojs/admin/", http.StatusMovedPermanently))
 	r.Mount("/ojs/admin/", http.StripPrefix("/ojs/admin/", admin.Handler()))
+}
 
-	// API documentation (Swagger UI)
-	commonapi.RegisterDocsRoutes(r, api.OpenAPISpec)
-
+// registerRealtimeRoutes wires the SSE, native WebSocket, and WebSocket-bridge
+// endpoints that stream job and queue events to clients.
+func registerRealtimeRoutes(r chi.Router, backend core.Backend, subscriber core.EventSubscriber) {
 	// Real-time SSE endpoints (always available via event bus)
 	sseHandler := api.NewSSEHandler(backend, subscriber)
 	r.Get("/ojs/v1/jobs/{id}/events", sseHandler.JobEvents)
@@ -177,19 +221,39 @@ r.Get("/readyz", systemHandler.Readyz)
 	r.Get("/ojs/v1/ws/connect", wsBridgeHandler.Connect)
 	r.Post("/ojs/v1/ws/subscribe", wsBridgeHandler.Subscribe)
 	r.Post("/ojs/v1/ws/unsubscribe", wsBridgeHandler.Unsubscribe)
-
-	return r
 }
 
 func metricsMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-		ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
-		next.ServeHTTP(ww, r)
+		wrapped, ww := api.NewStatusResponseWriter(w)
+		next.ServeHTTP(wrapped, r)
 		duration := time.Since(start).Seconds()
 		path := metricRoutePattern(r)
-		metrics.HTTPRequestsTotal.WithLabelValues(r.Method, path, fmt.Sprintf("%d", ww.Status())).Inc()
-		metrics.HTTPRequestDuration.WithLabelValues(r.Method, path, fmt.Sprintf("%d", ww.Status())).Observe(duration)
+		statusCode := fmt.Sprintf("%d", ww.Status())
+		metrics.HTTPRequestsTotal.WithLabelValues(r.Method, path, statusCode).Inc()
+		metrics.HTTPRequestDuration.WithLabelValues(r.Method, path, statusCode).Observe(duration)
+	})
+}
+
+// tracingMiddleware mirrors the shared OTel instrumentation without hiding
+// streaming and connection-upgrade interfaces from SSE and WebSocket handlers.
+func tracingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ctx := otel.GetTextMapPropagator().Extract(r.Context(), propagation.HeaderCarrier(r.Header))
+		ctx, span := ojsotel.Tracer().Start(ctx, r.Method+" "+r.URL.Path,
+			trace.WithSpanKind(trace.SpanKindServer),
+			trace.WithAttributes(
+				semconv.HTTPRequestMethodKey.String(r.Method),
+				attribute.String("url.path", r.URL.Path),
+				semconv.ServerAddress(r.Host),
+			),
+		)
+		defer span.End()
+
+		wrapped, sw := api.NewStatusResponseWriter(w)
+		next.ServeHTTP(wrapped, r.WithContext(ctx))
+		span.SetAttributes(semconv.HTTPResponseStatusCode(sw.Status()))
 	})
 }
 

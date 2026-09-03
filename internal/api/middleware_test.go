@@ -202,4 +202,3 @@ func TestLimitBody_SetsMaxBytesReader(t *testing.T) {
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)
 }
-

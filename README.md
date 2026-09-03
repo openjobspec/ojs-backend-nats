@@ -87,7 +87,7 @@ ojs.events.workflow.>              -- all workflow events
 
 ### Prerequisites
 
-- Go 1.24+
+- Go 1.25+
 - NATS 2.10+ with JetStream enabled
 
 ### Run with Docker Compose

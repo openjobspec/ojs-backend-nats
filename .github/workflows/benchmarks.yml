@@ -10,22 +10,14 @@ permissions:
   contents: write
   pull-requests: write
 
+env:
+  GOWORK: "off"
+  GOFLAGS: "-mod=readonly"
+
 jobs:
   benchmark:
     name: Performance Benchmarks
     runs-on: ubuntu-latest
-
-    services:
-      nats:
-        image: nats:latest
-        ports:
-          - 4222:4222
-        options: >-
-          --health-cmd "nats-server --signal health"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 5
-        command: ["--jetstream"]
 
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4
@@ -34,18 +26,33 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Run benchmarks
+      - name: Start NATS with JetStream
+        run: |
+          docker run -d --name nats \
+            -p 4222:4222 -p 8222:8222 \
+            -v "$PWD/docker/nats.conf:/etc/nats/nats.conf:ro" \
+            nats:2.10-alpine -c /etc/nats/nats.conf
+          for _ in $(seq 1 20); do
+            if wget -q --spider http://localhost:8222/healthz; then
+              exit 0
+            fi
+            sleep 1
+          done
+          docker logs nats
+          exit 1
+
+      - name: Run mocked HTTP and live NATS benchmarks
         env:
           NATS_URL: nats://localhost:4222
         run: |
-          go test ./internal/... -bench=. -benchmem -count=5 -run='^$' -timeout 10m | tee /tmp/bench-results.txt
+          go test ./internal/... -bench=. -benchmem -count=5 -run='^$' -timeout 10m | tee benchmark-results.txt
 
       - name: Store benchmark result
-        uses: benchmark-action/github-action-benchmark@v1
+        uses: benchmark-action/github-action-benchmark@4bdcce38c94cec68da58d012ac24b7b1155efe8b # v1.20.7
         with:
           name: OJS NATS Backend Benchmarks
           tool: go
-          output-file-path: /tmp/bench-results.txt
+          output-file-path: benchmark-results.txt
           github-token: ${{ secrets.GITHUB_TOKEN }}
           auto-push: ${{ github.ref == 'refs/heads/main' }}
           alert-threshold: '150%'

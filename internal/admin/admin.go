@@ -9,8 +9,8 @@ package admin
 
 import (
 	"embed"
-	"io/fs"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"strings"
 )
@@ -45,4 +45,3 @@ func Handler() http.Handler {
 		fileServer.ServeHTTP(w, r)
 	})
 }
-

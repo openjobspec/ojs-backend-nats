@@ -3,13 +3,21 @@ package kv
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 
 	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/openjobspec/ojs-backend-nats/internal/core"
 )
+
+// UniqueClaim is the revisioned owner record stored for a fingerprint.
+type UniqueClaim struct {
+	JobID     string `json:"job_id"`
+	ClaimedAt string `json:"claimed_at,omitempty"`
+}
 
 // UniqueStore manages unique job locks via NATS KV.
 type UniqueStore struct {
@@ -21,34 +29,64 @@ func NewUniqueStore(kv jetstream.KeyValue) *UniqueStore {
 	return &UniqueStore{store: NewStore(kv)}
 }
 
-// CheckAndSet attempts to acquire a unique lock for a job.
-// Returns the existing job ID if the lock is held, empty string if acquired.
-func (u *UniqueStore) CheckAndSet(ctx context.Context, fingerprint, jobID string) (string, error) {
-	// Try to create (fails if key exists)
-	_, err := u.store.Create(ctx, fingerprint, []byte(jobID))
+// CreateClaim acquires an unowned fingerprint.
+func (u *UniqueStore) CreateClaim(ctx context.Context, fingerprint, jobID string, now time.Time) (uint64, error) {
+	data, err := marshalUniqueClaim(UniqueClaim{JobID: jobID, ClaimedAt: core.FormatTime(now)})
 	if err != nil {
-		if err == jetstream.ErrKeyExists {
-			// Key exists - read the existing value
-			data, _, getErr := u.store.Get(ctx, fingerprint)
-			if getErr != nil {
-				return "", getErr
-			}
-			return string(data), nil
-		}
-		return "", err
+		return 0, err
 	}
-	return "", nil // Lock acquired
+	return u.store.Create(ctx, fingerprint, data)
 }
 
-// Release removes a unique lock.
-func (u *UniqueStore) Release(ctx context.Context, fingerprint string) error {
-	return u.store.Delete(ctx, fingerprint)
+// GetClaim returns the current fingerprint owner and KV revision.
+func (u *UniqueStore) GetClaim(ctx context.Context, fingerprint string) (UniqueClaim, uint64, error) {
+	data, revision, err := u.store.Get(ctx, fingerprint)
+	if err != nil {
+		return UniqueClaim{}, 0, err
+	}
+	claim, err := unmarshalUniqueClaim(data)
+	return claim, revision, err
+}
+
+// ReplaceClaim transfers ownership only if expectedRevision is still current.
+func (u *UniqueStore) ReplaceClaim(
+	ctx context.Context,
+	fingerprint string,
+	claim UniqueClaim,
+	expectedRevision uint64,
+) (uint64, error) {
+	data, err := marshalUniqueClaim(claim)
+	if err != nil {
+		return 0, err
+	}
+	return u.store.Update(ctx, fingerprint, data, expectedRevision)
+}
+
+// ReleaseClaim removes a claim only if expectedRevision is still current.
+func (u *UniqueStore) ReleaseClaim(ctx context.Context, fingerprint string, expectedRevision uint64) error {
+	return u.store.DeleteRevision(ctx, fingerprint, expectedRevision)
+}
+
+func marshalUniqueClaim(claim UniqueClaim) ([]byte, error) {
+	return json.Marshal(claim)
+}
+
+func unmarshalUniqueClaim(data []byte) (UniqueClaim, error) {
+	var claim UniqueClaim
+	if err := json.Unmarshal(data, &claim); err == nil && claim.JobID != "" {
+		return claim, nil
+	}
+	// Backward compatibility for existing buckets that stored only the job ID.
+	if len(data) == 0 {
+		return UniqueClaim{}, fmt.Errorf("empty unique claim")
+	}
+	return UniqueClaim{JobID: string(data)}, nil
 }
 
 // ComputeFingerprint computes a unique fingerprint for a job based on its unique policy.
 func ComputeFingerprint(job *core.Job) string {
 	h := sha256.New()
-	keys := job.Unique.Keys
+	keys := append([]string(nil), job.Unique.Keys...)
 	if len(keys) == 0 {
 		keys = []string{"type", "args"}
 	}

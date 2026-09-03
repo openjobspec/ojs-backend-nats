@@ -9,36 +9,38 @@ import (
 
 // jobState is the JSON-serializable state stored in NATS KV for each job.
 type jobState struct {
-	ID                  string            `json:"id"`
-	Type                string            `json:"type"`
-	State               string            `json:"state"`
-	Queue               string            `json:"queue"`
-	Args                json.RawMessage   `json:"args,omitempty"`
-	Meta                json.RawMessage   `json:"meta,omitempty"`
-	Priority            *int              `json:"priority,omitempty"`
-	Attempt             int               `json:"attempt"`
-	MaxAttempts         *int              `json:"max_attempts,omitempty"`
-	TimeoutMs           *int              `json:"timeout_ms,omitempty"`
-	CreatedAt           string            `json:"created_at,omitempty"`
-	EnqueuedAt          string            `json:"enqueued_at,omitempty"`
-	StartedAt           string            `json:"started_at,omitempty"`
-	CompletedAt         string            `json:"completed_at,omitempty"`
-	CancelledAt         string            `json:"cancelled_at,omitempty"`
-	ScheduledAt         string            `json:"scheduled_at,omitempty"`
-	Result              json.RawMessage   `json:"result,omitempty"`
-	Error               json.RawMessage   `json:"error,omitempty"`
-	Errors              []json.RawMessage `json:"errors,omitempty"`
-	Tags                []string          `json:"tags,omitempty"`
-	Retry               *core.RetryPolicy `json:"retry,omitempty"`
+	ID                  string             `json:"id"`
+	Type                string             `json:"type"`
+	State               string             `json:"state"`
+	Queue               string             `json:"queue"`
+	Args                json.RawMessage    `json:"args,omitempty"`
+	Meta                json.RawMessage    `json:"meta,omitempty"`
+	Priority            *int               `json:"priority,omitempty"`
+	Attempt             int                `json:"attempt"`
+	MaxAttempts         *int               `json:"max_attempts,omitempty"`
+	TimeoutMs           *int               `json:"timeout_ms,omitempty"`
+	CreatedAt           string             `json:"created_at,omitempty"`
+	EnqueuedAt          string             `json:"enqueued_at,omitempty"`
+	StartedAt           string             `json:"started_at,omitempty"`
+	CompletedAt         string             `json:"completed_at,omitempty"`
+	CancelledAt         string             `json:"cancelled_at,omitempty"`
+	ScheduledAt         string             `json:"scheduled_at,omitempty"`
+	Result              json.RawMessage    `json:"result,omitempty"`
+	Error               json.RawMessage    `json:"error,omitempty"`
+	Errors              []json.RawMessage  `json:"errors,omitempty"`
+	Tags                []string           `json:"tags,omitempty"`
+	Retry               *core.RetryPolicy  `json:"retry,omitempty"`
 	Unique              *core.UniquePolicy `json:"unique,omitempty"`
-	ExpiresAt           string            `json:"expires_at,omitempty"`
-	RetryDelayMs        *int64            `json:"retry_delay_ms,omitempty"`
-	ParentResults       []json.RawMessage `json:"parent_results,omitempty"`
-	VisibilityTimeoutMs *int              `json:"visibility_timeout_ms,omitempty"`
-	WorkflowID          string            `json:"workflow_id,omitempty"`
-	WorkflowStep        int               `json:"workflow_step,omitempty"`
-	WorkerID            string            `json:"worker_id,omitempty"`
-	RateLimitMaxPerSec  int               `json:"rate_limit_max_per_sec,omitempty"`
+	ExpiresAt           string             `json:"expires_at,omitempty"`
+	RetryDelayMs        *int64             `json:"retry_delay_ms,omitempty"`
+	ParentResults       []json.RawMessage  `json:"parent_results,omitempty"`
+	VisibilityTimeoutMs *int               `json:"visibility_timeout_ms,omitempty"`
+	WorkflowID          string             `json:"workflow_id,omitempty"`
+	WorkflowStep        int                `json:"workflow_step,omitempty"`
+	WorkerID            string             `json:"worker_id,omitempty"`
+	RateLimitMaxPerSec  int                `json:"rate_limit_max_per_sec,omitempty"`
+	DispatchSeq         uint64             `json:"dispatch_seq,omitempty"`
+	DispatchSource      string             `json:"dispatch_source,omitempty"`
 
 	// Unknown fields for forward compatibility
 	UnknownFields map[string]json.RawMessage `json:"unknown_fields,omitempty"`
@@ -75,6 +77,7 @@ func jobToState(job *core.Job) *jobState {
 		VisibilityTimeoutMs: job.VisibilityTimeoutMs,
 		WorkflowID:          job.WorkflowID,
 		WorkflowStep:        job.WorkflowStep,
+		WorkerID:            job.WorkerID,
 		UnknownFields:       job.UnknownFields,
 	}
 	if job.RateLimit != nil {
@@ -114,7 +117,11 @@ func stateToJob(s *jobState) *core.Job {
 		VisibilityTimeoutMs: s.VisibilityTimeoutMs,
 		WorkflowID:          s.WorkflowID,
 		WorkflowStep:        s.WorkflowStep,
+		WorkerID:            s.WorkerID,
 		UnknownFields:       s.UnknownFields,
+	}
+	if s.RateLimitMaxPerSec > 0 {
+		job.RateLimit = &core.RateLimitPolicy{MaxPerSecond: s.RateLimitMaxPerSec}
 	}
 	return job
 }
@@ -133,21 +140,34 @@ func unmarshalJobState(data []byte) (*core.Job, error) {
 	return stateToJob(&s), nil
 }
 
+func unmarshalJobRecord(data []byte) (*jobRecord, error) {
+	var state jobState
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, err
+	}
+	return &jobRecord{
+		Job:            stateToJob(&state),
+		DispatchSeq:    state.DispatchSeq,
+		DispatchSource: state.DispatchSource,
+	}, nil
+}
+
 // workflowState is the JSON-serializable state stored in KV for workflows.
 type workflowState struct {
-	ID          string                     `json:"id"`
-	Name        string                     `json:"name,omitempty"`
-	Type        string                     `json:"type"`
-	State       string                     `json:"state"`
-	Total       int                        `json:"total"`
-	Completed   int                        `json:"completed"`
-	Failed      int                        `json:"failed"`
-	CreatedAt   string                     `json:"created_at"`
-	CompletedAt string                     `json:"completed_at,omitempty"`
-	Callbacks   *core.WorkflowCallbacks    `json:"callbacks,omitempty"`
-	JobDefs     []core.WorkflowJobRequest  `json:"job_defs,omitempty"`
-	JobIDs      []string                   `json:"job_ids,omitempty"`
-	Results     map[string]json.RawMessage `json:"results,omitempty"`
+	ID           string                     `json:"id"`
+	Name         string                     `json:"name,omitempty"`
+	Type         string                     `json:"type"`
+	State        string                     `json:"state"`
+	Total        int                        `json:"total"`
+	Completed    int                        `json:"completed"`
+	Failed       int                        `json:"failed"`
+	CreatedAt    string                     `json:"created_at"`
+	CompletedAt  string                     `json:"completed_at,omitempty"`
+	Callbacks    *core.WorkflowCallbacks    `json:"callbacks,omitempty"`
+	JobDefs      []core.WorkflowJobRequest  `json:"job_defs,omitempty"`
+	JobIDs       []string                   `json:"job_ids,omitempty"`
+	Results      map[string]json.RawMessage `json:"results,omitempty"`
+	FinishedJobs map[string]bool            `json:"finished_jobs,omitempty"`
 }
 
 // activeJobInfo tracks an active job's visibility deadline.
@@ -155,6 +175,9 @@ type activeJobInfo struct {
 	Queue              string `json:"queue"`
 	VisibilityDeadline string `json:"visibility_deadline"`
 	WorkerID           string `json:"worker_id,omitempty"`
+	ClaimedAt          string `json:"claimed_at,omitempty"`
+	JobRevision        uint64 `json:"job_revision,omitempty"`
+	DispatchSeq        uint64 `json:"dispatch_seq,omitempty"`
 }
 
 // queueMeta stores per-queue metadata.

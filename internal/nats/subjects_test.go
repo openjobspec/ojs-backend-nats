@@ -103,13 +103,13 @@ func TestPriorityBucket(t *testing.T) {
 		priority int
 		want     int
 	}{
-		{100, 0},   // highest priority = lowest bucket
-		{50, 2},    // high
-		{0, 4},     // middle (changed from 5 to 4 because (100-0)/21 = 4)
-		{-50, 7},   // low
-		{-100, 9},  // lowest priority = highest bucket
-		{200, 0},   // clamp to 0
-		{-200, 9},  // clamp to 9
+		{100, 0},  // highest priority = lowest bucket
+		{50, 2},   // high
+		{0, 4},    // middle (changed from 5 to 4 because (100-0)/21 = 4)
+		{-50, 7},  // low
+		{-100, 9}, // lowest priority = highest bucket
+		{200, 0},  // clamp to 0
+		{-200, 9}, // clamp to 9
 	}
 	for _, tt := range tests {
 		got := PriorityBucket(tt.priority)

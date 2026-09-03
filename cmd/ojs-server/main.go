@@ -30,7 +30,7 @@ func main() {
 	})))
 
 	cfg := server.LoadConfig()
-	if err := cfg.BaseConfig.Validate(); err != nil {
+	if err := cfg.Validate(); err != nil {
 		slog.Error("configuration error", "error", err)
 		os.Exit(1)
 	}
@@ -50,14 +50,13 @@ func main() {
 		slog.Error("failed to initialize OpenTelemetry", "error", err)
 		os.Exit(1)
 	}
-	defer func() { _ = otelShutdown(context.Background()) }()
-
 	// Connect to NATS
 	backend, err := natsbackend.New(cfg.NatsURL)
 	if err != nil {
 		slog.Error("failed to connect to NATS", "error", err)
 		os.Exit(1)
 	}
+	defer func() { _ = otelShutdown(context.Background()) }()
 	defer backend.Close()
 
 	slog.Info("connected to NATS", "url", cfg.NatsURL)
@@ -75,7 +74,7 @@ func main() {
 	defer broker.Close()
 
 	// Create HTTP server with real-time support
-	router := server.NewRouterWithRealtime(backend, cfg, broker, broker)
+	router := server.NewRouterWithRealtime(backend, &cfg, broker, broker)
 	srv := &http.Server{
 		Addr:         ":" + cfg.Port,
 		Handler:      router,
@@ -131,4 +130,3 @@ func main() {
 
 	slog.Info("server stopped")
 }
-

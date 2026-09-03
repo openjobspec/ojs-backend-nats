@@ -2,8 +2,12 @@ package nats
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sort"
 	"time"
+
+	"github.com/nats-io/nats.go/jetstream"
 
 	"github.com/openjobspec/ojs-backend-nats/internal/core"
 )
@@ -42,39 +46,55 @@ func (b *NATSBackend) ListDeadLetter(ctx context.Context, limit, offset int) ([]
 
 // RetryDeadLetter retries a dead letter job.
 func (b *NATSBackend) RetryDeadLetter(ctx context.Context, jobID string) (*core.Job, error) {
-	if !b.dead.Exists(ctx, jobID) {
+	_, deadRevision, err := b.dead.Get(ctx, jobID)
+	if err != nil {
 		return nil, core.NewNotFoundError("Dead letter job", jobID)
 	}
 
 	now := time.Now()
 
-	job, err := b.getJobState(ctx, jobID)
+	record, err := b.getJobRecord(ctx, jobID)
 	if err != nil {
 		return nil, core.NewNotFoundError("Dead letter job", jobID)
 	}
+	job := record.Job
 
-	// Reset job state
-	job.State = core.StateAvailable
-	job.Attempt = 0
-	job.EnqueuedAt = core.FormatTime(now)
-	job.Error = nil
-	job.Errors = nil
-	job.CompletedAt = ""
-	job.RetryDelayMs = nil
+	if job.State == core.StateDiscarded {
+		job.State = core.StateAvailable
+		job.Attempt = 0
+		job.EnqueuedAt = core.FormatTime(now)
+		job.Error = nil
+		job.Errors = nil
+		job.CompletedAt = ""
+		job.RetryDelayMs = nil
+		record.DispatchSeq++
+		record.DispatchSource = "dead-retry"
+		if _, err := b.updateJobRecord(ctx, record); err != nil {
+			return nil, b.jobTransitionError(ctx, "retry dead-letter", jobID, core.StateDiscarded, err)
+		}
+	} else if job.State != core.StateAvailable || record.DispatchSource != "dead-retry" {
+		return nil, core.NewConflictError(
+			fmt.Sprintf("Cannot retry dead-letter job in state '%s'.", job.State),
+			map[string]any{"job_id": jobID, "current_state": job.State},
+		)
+	}
 
-	b.putJobState(ctx, job)
-	b.dead.Delete(ctx, jobID)
-
-	// Re-publish to JetStream
-	PublishJob(ctx, b.js, job.Queue, jobID)
+	if err := b.publishDispatch(ctx, record); err != nil {
+		return nil, core.NewInternalError(fmt.Sprintf("republishing dead-letter job: %v", err))
+	}
+	if err := b.dead.DeleteRevision(ctx, jobID, deadRevision); err != nil &&
+		!errors.Is(err, jetstream.ErrKeyExists) {
+		return nil, core.NewInternalError(fmt.Sprintf("removing dead-letter index: %v", err))
+	}
 
 	return b.Info(ctx, jobID)
 }
 
 // DeleteDeadLetter removes a job from the dead letter queue.
 func (b *NATSBackend) DeleteDeadLetter(ctx context.Context, jobID string) error {
-	if !b.dead.Exists(ctx, jobID) {
+	_, revision, err := b.dead.Get(ctx, jobID)
+	if err != nil {
 		return core.NewNotFoundError("Dead letter job", jobID)
 	}
-	return b.dead.Delete(ctx, jobID)
+	return b.dead.DeleteRevision(ctx, jobID, revision)
 }

@@ -62,14 +62,17 @@ const (
 	StateCancelled = common.StateCancelled
 	StateDiscarded = common.StateDiscarded
 
-	ErrCodeInvalidRequest  = common.ErrCodeInvalidRequest
-	ErrCodeValidationError = common.ErrCodeValidationError
-	ErrCodeNotFound        = common.ErrCodeNotFound
-	ErrCodeConflict        = common.ErrCodeConflict
-	ErrCodeDuplicate       = common.ErrCodeDuplicate
-	ErrCodeInternalError   = common.ErrCodeInternalError
-	ErrCodeUnsupported     = common.ErrCodeUnsupported
-	ErrCodeQueuePaused     = common.ErrCodeQueuePaused
+	ErrCodeInvalidRequest    = common.ErrCodeInvalidRequest
+	ErrCodeInvalidPayload    = common.ErrCodeInvalidPayload
+	ErrCodeValidationError   = common.ErrCodeValidationError
+	ErrCodeNotFound          = common.ErrCodeNotFound
+	ErrCodeConflict          = common.ErrCodeConflict
+	ErrCodeDuplicate         = common.ErrCodeDuplicate
+	ErrCodeInternalError     = common.ErrCodeInternalError
+	ErrCodeUnsupported       = common.ErrCodeUnsupported
+	ErrCodeQueuePaused       = common.ErrCodeQueuePaused
+	ErrCodeRateLimited       = common.ErrCodeRateLimited
+	ErrCodeVisibilityTimeout = common.ErrCodeVisibilityTimeout
 
 	OJSVersion                 = common.OJSVersion
 	OJSMediaType               = common.OJSMediaType
@@ -96,8 +99,10 @@ var (
 	NewInvalidRequestError = common.NewInvalidRequestError
 	NewNotFoundError       = common.NewNotFoundError
 	NewConflictError       = common.NewConflictError
+	NewDuplicateError      = common.NewDuplicateError
 	NewValidationError     = common.NewValidationError
 	NewInternalError       = common.NewInternalError
+	NewUnsupportedError    = common.NewUnsupportedError
 )
 
 // Checkpoint type aliases.

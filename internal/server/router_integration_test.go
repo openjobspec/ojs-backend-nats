@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/coder/websocket"
 	"github.com/openjobspec/ojs-backend-nats/internal/core"
 	natsbackend "github.com/openjobspec/ojs-backend-nats/internal/nats"
 )
@@ -150,6 +153,7 @@ func TestRouterEndToEnd_QueuePauseAndRateLimit(t *testing.T) {
 	if createResp1.StatusCode != http.StatusCreated {
 		t.Fatalf("first create status = %d, want %d", createResp1.StatusCode, http.StatusCreated)
 	}
+
 	_ = decodeJSONBody(t, createResp1.Body)
 
 	createResp2 := postJSON(t, tsURL+"/ojs/v1/jobs", map[string]any{
@@ -200,6 +204,116 @@ func TestRouterEndToEnd_QueuePauseAndRateLimit(t *testing.T) {
 	}
 	secondID, _ := secondJob["id"].(string)
 	ackJob(t, tsURL, secondID)
+}
+
+func TestRouterRealtime_FullMiddlewareSSE(t *testing.T) {
+	baseURL, backend, broker := newRealtimeIntegrationRouterServer(t)
+	ctx := context.Background()
+	queue := "it-realtime-sse-" + core.NewUUIDv7()
+	job, err := backend.Push(ctx, &core.Job{
+		Type:  "realtime.sse",
+		Queue: queue,
+		Args:  json.RawMessage(`[]`),
+	})
+	if err != nil {
+		t.Fatalf("Push() error = %v", err)
+	}
+
+	requestCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(
+		requestCtx,
+		http.MethodGet,
+		baseURL+"/ojs/v1/jobs/"+job.ID+"/events",
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Accept", "text/event-stream")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("SSE request error = %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("SSE status/content-type = %d/%q", resp.StatusCode, resp.Header.Get("Content-Type"))
+	}
+
+	event := core.NewStateChangedEvent(job.ID, queue, job.Type, core.StateAvailable, core.StateActive)
+	if err := broker.PublishJobEvent(event); err != nil {
+		t.Fatalf("PublishJobEvent() error = %v", err)
+	}
+
+	scanner := bufio.NewScanner(resp.Body)
+	foundRetry := false
+	foundEvent := false
+	foundJob := false
+	for scanner.Scan() {
+		line := scanner.Text()
+		switch {
+		case line == "retry: 3000":
+			foundRetry = true
+		case line == "event: job.state_changed":
+			foundEvent = true
+		case bytes.Contains([]byte(line), []byte(`"job_id":"`+job.ID+`"`)):
+			foundJob = true
+		}
+		if foundRetry && foundEvent && foundJob {
+			break
+		}
+	}
+	if !foundRetry || !foundEvent || !foundJob {
+		t.Fatalf("SSE stream missing fields retry=%t event=%t job=%t err=%v", foundRetry, foundEvent, foundJob, scanner.Err())
+	}
+}
+
+func TestRouterRealtime_FullMiddlewareNativeWebSocket(t *testing.T) {
+	baseURL, _, broker := newRealtimeIntegrationRouterServer(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	conn, resp, err := websocket.Dial(ctx, "ws"+baseURL[len("http"):]+"/ojs/v1/ws", &websocket.DialOptions{
+		Subprotocols: []string{"ojs.v1"},
+	})
+	if err != nil {
+		if resp != nil {
+			t.Fatalf("websocket dial status=%d error=%v", resp.StatusCode, err)
+		}
+		t.Fatalf("websocket dial error = %v", err)
+	}
+	defer conn.Close(websocket.StatusNormalClosure, "test complete")
+
+	if err := conn.Write(ctx, websocket.MessageText, []byte(`{"action":"subscribe","channel":"all"}`)); err != nil {
+		t.Fatalf("websocket subscribe write error = %v", err)
+	}
+	_, subscribed, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("websocket subscribe read error = %v", err)
+	}
+	var subscribedMessage map[string]any
+	if err := json.Unmarshal(subscribed, &subscribedMessage); err != nil {
+		t.Fatalf("decode subscribed message = %v", err)
+	}
+	if subscribedMessage["type"] != "subscribed" || subscribedMessage["channel"] != "all" {
+		t.Fatalf("subscribed message = %s", subscribed)
+	}
+
+	event := core.NewStateChangedEvent("job-ws", "default", "realtime.ws", core.StateAvailable, core.StateActive)
+	if err := broker.PublishJobEvent(event); err != nil {
+		t.Fatalf("PublishJobEvent() error = %v", err)
+	}
+	_, payload, err := conn.Read(ctx)
+	if err != nil {
+		t.Fatalf("websocket event read error = %v", err)
+	}
+	var message map[string]any
+	if err := json.Unmarshal(payload, &message); err != nil {
+		t.Fatalf("decode WebSocket event = %v", err)
+	}
+	if message["type"] != "event" || message["event"] != "job.state_changed" {
+		t.Fatalf("WebSocket event = %s", payload)
+	}
 }
 
 func postJSON(t *testing.T, url string, payload any) *http.Response {
@@ -261,6 +375,26 @@ func newIntegrationRouterServer(t *testing.T) string {
 	ts := httptest.NewServer(NewRouter(backend))
 	t.Cleanup(ts.Close)
 	return ts.URL
+}
+
+func newRealtimeIntegrationRouterServer(t *testing.T) (string, *natsbackend.NATSBackend, *natsbackend.PubSubBroker) {
+	t.Helper()
+	natsURL := os.Getenv("NATS_URL")
+	if natsURL == "" {
+		natsURL = "nats://localhost:4222"
+	}
+	backend, err := natsbackend.New(natsURL)
+	if err != nil {
+		t.Skipf("skipping realtime integration test; NATS unavailable at %s: %v", natsURL, err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+
+	broker := natsbackend.NewPubSubBroker(backend.Conn())
+	t.Cleanup(func() { _ = broker.Close() })
+	cfg := Config{}
+	ts := httptest.NewServer(NewRouterWithRealtime(backend, &cfg, broker, broker))
+	t.Cleanup(ts.Close)
+	return ts.URL, backend, broker
 }
 
 func fetchResponse(t *testing.T, baseURL, queue, workerID string) map[string]any {
